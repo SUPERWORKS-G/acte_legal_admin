@@ -1,7 +1,39 @@
 <!DOCTYPE html>
 <!--
-  acte.legal — Admin Dashboard v38
+  acte.legal — Admin Dashboard v39
   Visual system: identical to notariat_dashboard_v48.html
+  v39: ONE bug fix (master chat v37 patch request 2026-05-10, D005).
+       subtypeSlug() helper produced a hyphenated slug from the subtype
+       display label ("Legalizare semnătură" → "legalizare-semnatura"),
+       but the canonical subtype_key in act_subtypes is underscored
+       ("legalizare_semnatura"). The hyphenated slug was passed to
+       getExtrasForSubtype() (RPC) and validateDocx() — the RPC found
+       no matching row in subtype_field_requirements, validator soft-
+       failed to universal-only, and valid extras tokens like
+       SEMNATAR_DOCUMENT_TYPE were flagged as unknown. Latent since
+       v37 (B-A9 ship); workaround in place at the data layer (master
+       v37 seeded a hyphenated row for legalizari/legalizare_semnatura)
+       but the pattern doesn't scale — every future subtype-aware
+       template upload would need the same double-seed dance.
+       Fix: read canonical subtype_key from ACT_SUBTYPES_BY_TYPE[at]
+       by matching on display label, instead of slugifying the label.
+       Single call site at the validate-modal click handler. Lookup is
+       O(n) over a tiny array (≤ ~6 subtypes per act_type today);
+       acceptable. Helper subtypeSlug() deleted — dead code encoding
+       the wrong contract is worse than no code (master v37 directive).
+       Storage-path callers (lines ~3771, 3869, 3894 pre-patch) already
+       use sub.subtype_key directly — unaffected. After admin ships:
+       master drops the hyphenated workaround seed row.
+       Not changed: FIELD_SUFFIXES (v36 lock), getExtrasForSubtype
+       contract (v37 lock, RPC remains canonical source of truth),
+       EXTRAS_CACHE session-scope (v37 lock), commitUpload supersede-
+       first ordering (v38 lock), N049 banner suppression (v38).
+       All B-A9/B-A10 carry forward intact.
+       Out of scope:
+         • 130-row hyphenated drift in subtype_field_requirements
+           (Ship 4 cleanup, master orchestrates)
+         • Squarespace tip_inscris drift (forms-chat ticket, separate)
+
   v38: TWO fixes (master chat v27 patch request 2026-05-08).
 
        B-A10 (HIGH BLOCKER) — commitUpload supersede ordering. Surfaced
@@ -2129,7 +2161,11 @@ function validTokensFor(actType, subtypeKey, extrasRows){
   CASE_TOKENS.forEach(function(t){tokens.push(t);});
   return tokens;
 }
-function subtypeSlug(sub){return sub.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,'-').replace(/[^a-z0-9-]/g,'');}
+// v39: subtypeSlug() helper removed (D005). Slugified the display
+// label with hyphens; canonical subtype_key in act_subtypes is
+// underscored. Validate-modal call site now reads subtype_key
+// directly from ACT_SUBTYPES_BY_TYPE by matching on label.
+// Storage paths already use sub.subtype_key directly.
 
 // ══ HELPERS ════════════════════════════════════════════════════════
 function h(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
@@ -3705,8 +3741,13 @@ document.getElementById('upload-submit').addEventListener('click',function(){
   }
   // Step 1: validate
   this.disabled=true;this.textContent='Se validează...';
+  // D005 (v39) — read canonical subtype_key from ACT_SUBTYPES_BY_TYPE
+  // by matching on display label, instead of slugifying with hyphens.
+  // RPC + storage rely on the canonical underscored subtype_key.
+  var subEntry=(ACT_SUBTYPES_BY_TYPE[at]||[]).find(function(s){return s.label===sub;});
+  var subSlug=subEntry?subEntry.subtype_key:null;
+  if(!subSlug){soundErr();showValResult(false,[],[],'Subtip necunoscut: '+sub);btn.disabled=false;btn.textContent='Validează ⟶';return;}
   // B-A9 — fetch subtype-aware extras (cached) before validating tokens
-  var subSlug=subtypeSlug(sub);
   getExtrasForSubtype(at,subSlug,function(extrasRows){
     validateDocx(selectedFile,at,subSlug,extrasRows,function(err,result){
       btn.disabled=false;
