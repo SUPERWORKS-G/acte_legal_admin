@@ -1,7 +1,48 @@
 <!DOCTYPE html>
 <!--
-  acte.legal — Admin Dashboard v39
+  acte.legal — Admin Dashboard v40
   Visual system: identical to notariat_dashboard_v48.html
+  v40: ONE bug fix (master chat v40 patch request 2026-05-11, D009-related).
+       prepare-case-document.ts v4 (master, D009 closure) introduced a new
+       token convention for subtypes where a single role appears 2+ times
+       per case. Today's sole duplicate-role subtype is declaratii/
+       consimtamant_calatorie_ambii_parinti — both case_parties rows have
+       role='parinte', so EF v4 emits PARINTE_1_FULL_NAME, PARINTE_2_CNP,
+       etc. instead of bare PARINTE_FULL_NAME (which would collide).
+       Admin v39's validTokensFor() only emitted bare {ROLE_PREFIX}_{SFX}
+       tokens — the EF v4 suffixed pattern was flagged as "tokeni
+       necunoscuți", upload blocked, D009 smoke stuck.
+       Fix: data-driven duplicate-role expansion alongside the existing
+       universal loop. New constant DUPLICATE_ROLES_BY_SUBTYPE declares
+       which (act_type, subtype_key) → which roles duplicate. For those
+       roles only, validator emits suffixed forms {PFX}_1_{SFX} and
+       {PFX}_2_{SFX} for all 14 universal suffixes + all matching extras
+       rows. Iterates the duplicate map DIRECTLY (not ROLES_BY_ACT) —
+       'parinte' isn't a canonical role for declaratii (Declarant is),
+       so adding it to ROLES_BY_ACT would have downstream side effects
+       in token-group rendering at line 4044. Map is parallel data.
+       STRICTNESS: suffixed-only for duplicate roles (NOT bare + suffixed).
+       Bare PARINTE_FULL_NAME in a template targeting ambii_parinti would
+       render blank in the .docx (EF v4 nullGetter), so validator rejects
+       at upload time rather than letting it fail silently at Pregătește.
+       Single-role subtypes unaffected — bare-only behavior unchanged.
+       Master confirmed Read B (iterate dup map directly) + suffixed-only
+       strictness in spec confirmation file 2026-05-11.
+       Net behavior:
+         • Single-role subtypes (e.g. legalizare_semnatura): bare tokens
+           valid, suffixed rejected. No change from v39.
+         • Duplicate-role subtypes (e.g. ambii_parinti): suffixed valid,
+           bare rejected. New in v40.
+       Not changed: ROLES_BY_ACT (lock preserved), FIELD_SUFFIXES (v36
+       lock), getExtrasForSubtype contract (v37 lock), EXTRAS_CACHE
+       session-scope (v37 lock), commitUpload supersede-first ordering
+       (v38 lock), D005 canonical subtype_key lookup (v39 lock).
+       Out of scope:
+         • Patch 2 (subtype dropdown cropping) — admin proposes options
+           in next round, master picks, ships separately
+         • Future duplicate-role subtypes — one-line config add to
+           DUPLICATE_ROLES_BY_SUBTYPE when master orchestrates them
+
   v39: ONE bug fix (master chat v37 patch request 2026-05-10, D005).
        subtypeSlug() helper produced a hyphenated slug from the subtype
        display label ("Legalizare semnătură" → "legalizare-semnatura"),
@@ -2087,6 +2128,21 @@ function coverageFor(oid){
   return {covered:covered,target:COVERAGE_TARGET,total:tpls.length};
 }
 var ROLES_BY_ACT = {procuri:['Mandant','Mandatar'],declaratii:['Declarant'],acorduri:['Parte I','Parte II'],legalizari:['Semnatar']};
+// v40 (D009-related, master v40 patch 2026-05-11): per (act_type, subtype_key),
+// roles that appear 2+ times on a single case. EF v4 (prepare-case-document)
+// emits position-suffixed tokens for these — {ROLE_PREFIX}_1_{SUFFIX} and
+// {ROLE_PREFIX}_2_{SUFFIX} — instead of bare {ROLE_PREFIX}_{SUFFIX} which
+// would collide. Validator must mirror EF emission: for these (act_type,
+// subtype_key) pairs, accept the suffixed forms and REJECT bare forms.
+// Map iterates DIRECTLY (not nested in ROLES_BY_ACT) — roles here may not
+// appear in ROLES_BY_ACT (e.g. 'parinte' is not a canonical declaratii role;
+// only 'Declarant' is). Adding new duplicate-role subtypes is a one-line
+// config edit here; no code change in validTokensFor() needed.
+var DUPLICATE_ROLES_BY_SUBTYPE = {
+  'declaratii': {
+    'consimtamant_calatorie_ambii_parinti': ['parinte']
+  }
+};
 // v36 (B-A8 fix): canonical Batch 5.5 universal-token registry. The prior
 // array (NAME/CNP/ID_SERIES/BIRTH_DATE/ADDRESS/PHONE/EMAIL — 7 entries) was
 // stale; canonical schema defines 13 universal fields per role plus the
@@ -2157,6 +2213,32 @@ function validTokensFor(actType, subtypeKey, extrasRows){
       if(pfx && suffix) tokens.push(pfx+'_'+suffix);
     });
   }
+  // v40 (D009-related) — Duplicate-role expansion. For (act_type, subtype_key)
+  // pairs declared in DUPLICATE_ROLES_BY_SUBTYPE, emit position-suffixed tokens
+  // ({PFX}_1_{SFX}, {PFX}_2_{SFX}) for both universal suffixes AND matching
+  // extras rows. Iterates the duplicate map DIRECTLY (Read B, master-confirmed).
+  // Suffixed-only — bare {PFX}_{SFX} for these roles is intentionally rejected
+  // because EF v4 would render bare tokens blank in the .docx for duplicate-role
+  // cases. Catch broken templates at upload time, not at Pregătește.
+  var dupRoles=(DUPLICATE_ROLES_BY_SUBTYPE[actType]||{})[subtypeKey]||[];
+  dupRoles.forEach(function(r){
+    var pfx=roleToPrefix(r);
+    if(!pfx) return;
+    FIELD_SUFFIXES.forEach(function(s){
+      tokens.push(pfx+'_1_'+s);
+      tokens.push(pfx+'_2_'+s);
+    });
+    if(extrasRows && extrasRows.length){
+      extrasRows.forEach(function(row){
+        if(row.role!==r) return;
+        var suffix=String(row.field_key||'').toUpperCase();
+        if(suffix){
+          tokens.push(pfx+'_1_'+suffix);
+          tokens.push(pfx+'_2_'+suffix);
+        }
+      });
+    }
+  });
   // Case-level
   CASE_TOKENS.forEach(function(t){tokens.push(t);});
   return tokens;
