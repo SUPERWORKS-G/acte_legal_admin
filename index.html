@@ -1,7 +1,54 @@
 <!DOCTYPE html>
 <!--
-  acte.legal — Admin Dashboard v40
+  acte.legal — Admin Dashboard v41
   Visual system: identical to notariat_dashboard_v48.html
+  v41: ONE cosmetic fix (master chat v40 Patch 2, 2026-05-11).
+       The subtype dropdown in INTRĂRI BRUTE rows + the upload modal
+       cropped long option labels mid-character. Screenshot 2026-05-11
+       showed "CONSIMȚĂMÂNT CĂLĂTORIE MINO..." with no closing context —
+       users couldn't distinguish "(un părinte)" from "(ambii părinți)".
+       Root cause: .cdd-panel was pinned with left:0 + right:0, forcing
+       panel width to match the trigger. Combined with white-space:nowrap
+       on .cdd-opt, anything longer than the trigger truncated visually
+       (text-overflow defaulted to clipping since no ellipsis was set).
+       Fix: panel breaks out wider than trigger when content demands it.
+       Single CSS change at .cdd-panel:
+         • drop right:0
+         • add width:max-content    (sizes to longest option)
+         • add min-width:100%       (never narrower than trigger)
+         • add max-width:480px      (cap against pathological labels)
+       Behavior:
+         • Short options (e.g. plan tiers — Starter, Pro, Trial 30 zile):
+           panel stays at trigger width because max-content < trigger
+           width. NO VISUAL CHANGE for cdd-of-plan, cdd-co-plan,
+           cdd-iv-office, cdd-up-act-type.
+         • Long options (subtype labels — Consimțământ călătorie minor
+           (ambii părinți)): panel expands rightward to fit longest
+           option. Affects cdd-up-subtype + per-row cdd-raw-sub-*.
+         • Pathological long labels (>480px wide): panel caps at 480px;
+           the option clips at the cap edge. No viewport overflow. No
+           real label hits this today — cap is a safety net, not a
+           routine behavior. If a future label ever approaches 480px,
+           shorten it at the data layer.
+       Rationale for global rule (not scoped class): max-content is a
+       no-op for short content, so applying globally costs nothing for
+       the 4 short-content dropdowns and self-heals any future dropdown
+       whose labels grow long. Scoped class would require remembering
+       to add .cdd-wide on every new long-content instance — exactly
+       the opaque-class trap George has flagged before.
+       Side effect: when widened panel opens in INTRĂRI BRUTE rows,
+       it visually overlays DESCARCĂ / FINALIZEAZĂ / ELIMINĂ buttons
+       to the right of the subtype dropdown. Acceptable — those
+       buttons are not the user's focus while picking a subtype, and
+       the panel closes on outside-click restoring normal access.
+       Not changed: any JS, any other CSS rule, the cdd IIFE, any
+       z-index trick (the existing field-stacked:has(.cdd.open)
+       z-index:400 hoist still works exactly the same).
+       Out of scope:
+         • The trigger row's two-line label (already wraps fine —
+           "Consimțământ călătorie / minor (ambii părinți)")
+         • Any data-side relabeling of act_subtypes.subtype_label_ro
+
   v40: ONE bug fix (master chat v40 patch request 2026-05-11, D009-related).
        prepare-case-document.ts v4 (master, D009 closure) introduced a new
        token convention for subtypes where a single role appears 2+ times
@@ -938,7 +985,14 @@ html,body{background:var(--white);color:var(--ink);font-family:var(--sans);font-
 .cdd-trigger::after{content:'';position:absolute;right:6px;top:50%;width:7px;height:7px;border-right:1.5px solid var(--grey2);border-bottom:1.5px solid var(--grey2);transform:translateY(-70%) rotate(45deg);pointer-events:none;transition:border-color .15s,transform .2s;}
 .cdd.open .cdd-trigger::after{border-right-color:var(--ink);border-bottom-color:var(--ink);transform:translateY(-30%) rotate(225deg);}
 .cdd-trigger.disabled::after{border-right-color:var(--grey2);border-bottom-color:var(--grey2);opacity:.5;}
-.cdd-panel{position:absolute;top:calc(100% + 2px);left:0;right:0;background:var(--white);border-top:1px solid var(--rule);border-bottom:1px solid var(--rule);z-index:300;max-height:240px;overflow-y:auto;scrollbar-width:none;display:none;}
+.cdd-panel{position:absolute;top:calc(100% + 2px);left:0;width:max-content;min-width:100%;max-width:480px;background:var(--white);border-top:1px solid var(--rule);border-bottom:1px solid var(--rule);z-index:300;max-height:240px;overflow-y:auto;scrollbar-width:none;display:none;}
+/* v41 (master v40 Patch 2): panel breaks out wider than trigger when option
+   content exceeds trigger width. width:max-content sizes to the longest option;
+   min-width:100% keeps the panel never narrower than the trigger; max-width:480px
+   caps against pathological labels. For short-content dropdowns (e.g. cdd-of-plan
+   with options like "Starter"/"Pro"), max-content is below trigger width so panel
+   renders at trigger width — no visual change. Drops the v28 right:0 anchoring.
+   .cdd-opt keeps white-space:nowrap; no real label today approaches the 480px cap. */
 .cdd-panel::-webkit-scrollbar{display:none;}
 .cdd.open .cdd-panel{display:block;animation:cddIn .15s ease;}
 /* v28 / Phase 1.2: when a cdd dropdown sits inside a .field-stacked row that
