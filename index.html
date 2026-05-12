@@ -1,7 +1,97 @@
 <!DOCTYPE html>
 <!--
-  acte.legal — Admin Dashboard v41
+  acte.legal — Admin Dashboard v42
   Visual system: identical to notariat_dashboard_v48.html
+  v42: ONE bug fix (master chat v43 work order 2026-05-12, N065 closure).
+       D007 priority 1.3 (un_parinte template upload) was blocked: admin
+       v41's validator rejected 9 universal PARINTE_* tokens as
+       "necunoscuți" even though template + DB seed were correct per
+       manifest v2. Root cause: ROLES_BY_ACT static map only knew
+       'Declarant' for declaratii — never 'parinte', which is the
+       canonical role in subtype_field_requirements for the un_parinte
+       and ambii_parinti subtypes. Validator's universal-token expansion
+       (line 2261) iterates ROLES_BY_ACT[actType] and emits 14 suffixes ×
+       N roles. For un_parinte, that's 14 DECLARANT_* — none of which
+       appear in a parinte-based template. Extras passed because
+       getExtrasForSubtype() returns role-correct DB rows; only universals
+       were affected.
+       Master locked Path B (subtype-aware role lookup from DB) over
+       Path A (one-line map patch) per Directive 11.7 + 13.22. Static
+       map at act-type level can't express subtype-level role variation;
+       same shape would re-bite on any future subtype with non-default
+       roles. Retire the duplication; source from DB.
+       Fix structure:
+         (1) New RPC contract get_roles_for_subtype(p_act_type, p_subtype)
+             returns TABLE(role text). Master ships RPC; admin calls it.
+         (2) New ROLES_CACHE + getRolesForSubtype() helper near
+             EXTRAS_CACHE. Same caching pattern (session-scoped, keyed
+             by actType|subtypeKey). RPC error path → fallback to
+             ROLES_BY_ACT[actType] (graceful degrade). RPC empty-result
+             path → console.warn + same fallback (empty roles is a
+             data-layer smell, not a legitimate state; fail-open keeps
+             validator working, warn surfaces the smell to DevTools).
+             Master-approved.
+         (3) validTokensFor() becomes 4-arg:
+             (actType, subtypeKey, extrasRows, rolesForSubtype)
+             Line 2259: var roles = rolesForSubtype || ROLES_BY_ACT[actType] || []
+             Rest of function unchanged. DUPLICATE_ROLES_BY_SUBTYPE
+             expansion at line 2277+ unchanged.
+         (4) validateDocx() becomes 6-arg: (file, actType, subtypeKey,
+             extrasRows, rolesForSubtype, callback). Passes rolesForSubtype
+             through to validTokensFor().
+         (5) Validate-modal click handler chains getRolesForSubtype()
+             alongside getExtrasForSubtype() before validateDocx() —
+             nested callback pattern matches existing extras flow.
+       Role shape normalization: DB returns canonical lowercase
+       ('parinte', 'semnatar', 'mandant', etc.); static map fallback uses
+       titlecase ('Parinte', 'Semnatar', 'Mandant'). Both flow through
+       roleToPrefix() (NFD strip → uppercase → underscore-whitespace →
+       strip-non-alphanumeric), so 'parinte' and 'Parinte' both normalize
+       to 'PARINTE'. Same downstream output. No code change needed at
+       roleToPrefix; documented here per master ack.
+       Net behavior:
+         • v40 lock preserved (full enforcement, β2): bare universals AND
+           bare extras for duplicate-role subtypes (e.g. ambii_parinti's
+           'parinte') remain rejected; suffixed expansion via
+           DUPLICATE_ROLES_BY_SUBTYPE is the only accepted path. The
+           same dup-role filter is applied at BOTH loops inside
+           validTokensFor() (universal loop ~line 2402, extras loop
+           ~line 2411). Without these filters, Path B would have inverted
+           the v40 lock — bare PARINTE_* and bare PARINTE_MINOR_NUME_COMPLET
+           would have become valid for ambii_parinti templates, silently
+           rendering blank at Pregătește via EF v4 nullGetter. v40's
+           stated intent was generic ("bare {PFX}_{SFX} for these roles
+           is intentionally rejected"); v41 enforced it only on universals
+           via the static-map shape — an inherited partial enforcement
+           that admin caught reading line-by-line during v42 ship. β2
+           closes that gap. Master confirmed (β2) 2026-05-12.
+         • Single-role atypical subtype (un_parinte): roles=['parinte']
+           from DB → 14 PARINTE_* + 11 extras + 3 case = 28 valid tokens.
+           Was 17 with stale map (14 DECLARANT_* + 3 case + extras).
+         • Duplicate-role subtype (ambii_parinti): roles=['parinte']
+           from DB → 14 PARINTE_* bare + 28 PARINTE_1/2_* via dup map
+           + extras + 3 case. DUPLICATE_ROLES_BY_SUBTYPE expansion
+           preserved. v40 contract holds.
+         • Default subtypes (legalizare_semnatura): DB returns
+           ['semnatar'] → roleToPrefix → SEMNATAR. Identical output to
+           static map's ['Semnatar']. No regression.
+         • RPC error: fallback to ROLES_BY_ACT[actType]. Acts like v41
+           for affected subtype. Validator still functional.
+       Not changed: ROLES_BY_ACT (kept as fallback, comment updated to
+       reflect status), DUPLICATE_ROLES_BY_SUBTYPE (v40 lock),
+       FIELD_SUFFIXES (v36 lock), CASE_TOKENS, roleToPrefix() (v32
+       lock), getExtrasForSubtype/EXTRAS_CACHE (v37 lock), commitUpload
+       supersede-first (v38 lock), D005 subtype_key lookup (v39 lock),
+       D009 duplicate-role expansion (v40 lock), .cdd-panel widen
+       (v41 lock).
+       RPC dependency: get_roles_for_subtype must exist in Supabase
+       before v42 deploys live. Master ships RPC ahead of admin deploy.
+       Admin chat verified RPC contract in work order section 6.
+       Out of scope:
+         • Removing ROLES_BY_ACT entirely (kept as fallback, locked here)
+         • Touching DUPLICATE_ROLES_BY_SUBTYPE (correct as-is)
+         • Any other dashboard/EF/DB surface
+
   v41: ONE cosmetic fix (master chat v40 Patch 2, 2026-05-11).
        The subtype dropdown in INTRĂRI BRUTE rows + the upload modal
        cropped long option labels mid-character. Screenshot 2026-05-11
@@ -2181,6 +2271,12 @@ function coverageFor(oid){
   });
   return {covered:covered,target:COVERAGE_TARGET,total:tpls.length};
 }
+// v42 (N065 closure, master v43 work order 2026-05-12): kept as FALLBACK ONLY
+// for RPC-failure scenarios. DB truth via get_roles_for_subtype() RPC is
+// authoritative — see getRolesForSubtype() below. Static map at act-type level
+// cannot express subtype-level role variation (e.g. declaratii has 'Declarant'
+// here but 'parinte' in DB for un_parinte/ambii_parinti subtypes). DO NOT
+// hand-extend this map to fix new subtypes — the DB is the source of truth.
 var ROLES_BY_ACT = {procuri:['Mandant','Mandatar'],declaratii:['Declarant'],acorduri:['Parte I','Parte II'],legalizari:['Semnatar']};
 // v40 (D009-related, master v40 patch 2026-05-11): per (act_type, subtype_key),
 // roles that appear 2+ times on a single case. EF v4 (prepare-case-document)
@@ -2254,17 +2350,76 @@ function getExtrasForSubtype(actType, subtypeKey, callback){
     });
 }
 
+// v42 (N065) — Subtype-aware role lookup. Mirrors getExtrasForSubtype shape.
+// Session-scoped cache; cleared on page reload. Empty result from RPC →
+// console.warn (data-layer smell — every active subtype should have ≥1 role)
+// + fallback to ROLES_BY_ACT[actType]. RPC error → same fallback. Both paths
+// keep the validator functional; the warn surfaces drift to DevTools.
+// Returns array of role strings (lowercase per DB canonical form).
+var ROLES_CACHE = {};
+function getRolesForSubtype(actType, subtypeKey, callback){
+  if(!actType || !subtypeKey){ callback(null); return; }  // null → caller uses static fallback
+  var k = actType + '|' + subtypeKey;
+  if(ROLES_CACHE[k]){ callback(ROLES_CACHE[k]); return; }
+  sb.rpc('get_roles_for_subtype', { p_act_type: actType, p_subtype: subtypeKey })
+    .then(function(res){
+      if(res.error){
+        console.error('[N065 roles lookup]', res.error);
+        callback(null);  // → caller uses ROLES_BY_ACT[actType] fallback
+        return;
+      }
+      var list = (res.data || []).map(function(r){ return r.role; }).filter(Boolean);
+      if(list.length === 0){
+        console.warn('[N065 roles lookup] empty result for '+k+' — falling back to static map. Check subtype_field_requirements seed.');
+        callback(null);
+        return;
+      }
+      ROLES_CACHE[k] = list;
+      callback(list);
+    })
+    .catch(function(err){
+      console.error('[N065 roles lookup]', err);
+      callback(null);
+    });
+}
+
 function roleToPrefix(r){return r.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase().replace(/\s+/g,'_').replace(/[^A-Z0-9_]/g,'');}
-function validTokensFor(actType, subtypeKey, extrasRows){
-  var roles=ROLES_BY_ACT[actType]||[],tokens=[];
+function validTokensFor(actType, subtypeKey, extrasRows, rolesForSubtype){
+  // v42 (N065): rolesForSubtype (from get_roles_for_subtype RPC) is authoritative
+  // when present. Falls back to ROLES_BY_ACT[actType] static map only on RPC
+  // failure or empty result (see getRolesForSubtype). Both shapes flow through
+  // roleToPrefix() so DB lowercase ('parinte') and static titlecase ('Parinte')
+  // produce identical token output ('PARINTE_*').
+  //
+  // v42 + v40 lock coexistence (full enforcement):
+  // DB tells us which roles a subtype uses; DUPLICATE_ROLES_BY_SUBTYPE tells
+  // us how to expand them (suffixed vs bare). For roles in the dup map, both
+  // universal and extras loops suppress bare expansion HERE so the v40 lock
+  // survives: bare {PFX}_{SFX} and bare {PFX}_{EXTRAS_KEY} stay rejected
+  // (would render blank at Pregătește via EF nullGetter), and only the
+  // position-suffixed tokens are accepted via the dup-expansion block below.
+  // Removing this filter from EITHER loop reintroduces the silent-failure
+  // bug v40 was built to catch.
+  var dupRolesForFilter=(DUPLICATE_ROLES_BY_SUBTYPE[actType]||{})[subtypeKey]||[];
+  var dupPrefixSet=dupRolesForFilter.map(function(r){return roleToPrefix(r);});
+  var rawRoles=(rolesForSubtype && rolesForSubtype.length)?rolesForSubtype:(ROLES_BY_ACT[actType]||[]);
+  // Filter via roleToPrefix() equality so DB lowercase ('parinte') and any
+  // hypothetical static-map titlecase ('Parinte') both get caught.
+  var roles=rawRoles.filter(function(r){return dupPrefixSet.indexOf(roleToPrefix(r))<0;});
+  var tokens=[];
   // Universal per-role (14 suffixes × N roles)
   roles.forEach(function(r){var pfx=roleToPrefix(r);FIELD_SUFFIXES.forEach(function(s){tokens.push(pfx+'_'+s);});});
   // B-A9 — Subtype-aware extras (role-scoped). Each row emits {ROLE_PREFIX}_{FIELD_KEY_UPPER}.
+  // v42 (β2): dup-role filter applied here too — extras rows whose role is in
+  // the dup map are skipped at this loop; their suffixed variants are emitted
+  // by the dup-expansion block below. Full v40 lock enforcement (both loops).
   if(extrasRows && extrasRows.length){
     extrasRows.forEach(function(row){
       var pfx=roleToPrefix(row.role);
+      if(!pfx) return;
+      if(dupPrefixSet.indexOf(pfx)>=0) return;  // v42 β2: bare extras for dup-roles rejected
       var suffix=String(row.field_key||'').toUpperCase();
-      if(pfx && suffix) tokens.push(pfx+'_'+suffix);
+      if(suffix) tokens.push(pfx+'_'+suffix);
     });
   }
   // v40 (D009-related) — Duplicate-role expansion. For (act_type, subtype_key)
@@ -3842,7 +3997,7 @@ function checkUploadReady(){
   document.getElementById('upload-submit').disabled=!(at&&sub&&selectedFile);
 }
 
-function validateDocx(file,actType,subtypeKey,extrasRows,callback){
+function validateDocx(file,actType,subtypeKey,extrasRows,rolesForSubtype,callback){
   var reader=new FileReader();
   reader.onload=function(e){
     try{
@@ -3851,7 +4006,7 @@ function validateDocx(file,actType,subtypeKey,extrasRows,callback){
       var found=xml.match(/\{[A-Z_][A-Z0-9_]*\}/g)||[];
       var unique=[];
       found.forEach(function(t){var tk=t.slice(1,-1);if(unique.indexOf(tk)<0)unique.push(tk);});
-      var valid=validTokensFor(actType,subtypeKey,extrasRows);  // B-A9
+      var valid=validTokensFor(actType,subtypeKey,extrasRows,rolesForSubtype);  // v42 N065 (4-arg)
       var unknown=unique.filter(function(t){return valid.indexOf(t)<0;});
       callback(null,{tokens:unique,unknown:unknown});
     }catch(ex){callback('Fișierul nu poate fi citit: '+ex.message,null);}
@@ -3884,20 +4039,26 @@ document.getElementById('upload-submit').addEventListener('click',function(){
   var subSlug=subEntry?subEntry.subtype_key:null;
   if(!subSlug){soundErr();showValResult(false,[],[],'Subtip necunoscut: '+sub);btn.disabled=false;btn.textContent='Validează ⟶';return;}
   // B-A9 — fetch subtype-aware extras (cached) before validating tokens
+  // v42 (N065) — also fetch subtype-aware roles (cached) from get_roles_for_subtype RPC.
+  // Nested callback pattern matches existing extras flow. Both fetches complete
+  // before validateDocx runs. getRolesForSubtype returns null on RPC error or
+  // empty result; validTokensFor then falls back to ROLES_BY_ACT[actType] static map.
   getExtrasForSubtype(at,subSlug,function(extrasRows){
-    validateDocx(selectedFile,at,subSlug,extrasRows,function(err,result){
-      btn.disabled=false;
-      if(err){soundErr();showValResult(false,[],[],err);btn.textContent='Validează ⟶';return;}
-      if(result.unknown.length>0){
-        soundErr();showValResult(false,result.tokens,result.unknown,'Tokeni necunoscuți. Verifică și reîncarcă.');
-        btn.textContent='Validează ⟶';
-        validationResult=null;
-        return;
-      }
-      validationResult=result;
-      showValResult(true,result.tokens,[],'');
-      soundSelect();
-      btn.textContent='Confirmă și încarcă ⟶';
+    getRolesForSubtype(at,subSlug,function(rolesForSubtype){
+      validateDocx(selectedFile,at,subSlug,extrasRows,rolesForSubtype,function(err,result){
+        btn.disabled=false;
+        if(err){soundErr();showValResult(false,[],[],err);btn.textContent='Validează ⟶';return;}
+        if(result.unknown.length>0){
+          soundErr();showValResult(false,result.tokens,result.unknown,'Tokeni necunoscuți. Verifică și reîncarcă.');
+          btn.textContent='Validează ⟶';
+          validationResult=null;
+          return;
+        }
+        validationResult=result;
+        showValResult(true,result.tokens,[],'');
+        soundSelect();
+        btn.textContent='Confirmă și încarcă ⟶';
+      });
     });
   });
 });
