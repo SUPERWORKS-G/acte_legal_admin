@@ -1,7 +1,44 @@
 <!DOCTYPE html>
 <!--
-  acte.legal — Admin Dashboard v44.3
+  acte.legal — Admin Dashboard v44.4
   Visual system: identical to notariat_dashboard_v48.html
+  v44.4: Patch 3 — final piece of Round 2.
+       (A) New "Retrimite link de activare" button in office detail modal
+           (Detalii → Abonament sub-tab, right below the existing "Link card"
+           row). Calls resend-notary-invite EF. Gate: setup_completed_at IS
+           NULL AND lifecycle_status='active'. Confirmation dialog per
+           archive spec: "Trimite din nou link-ul de activare către {email}?"
+           4xx Romanian toasts:
+             office_not_found       → "Biroul nu a fost găsit."
+             already_completed      → "Notarul s-a autentificat deja."
+             no_contact_email...    → "Lipsește emailul de contact."
+             office_not_active      → "Biroul nu este activ."
+           5xx → generic + console.error. Re-send does NOT change office
+           state — visual cue persists until notary actually logs in.
+       (B) "Neactivat" visual cue on BIROURI rows. Red pulsating dot to the
+           left of office name + "Neactivat" pill (replaces ACTIV tag) when
+           gate is open. Both disappear together once setup_completed_at
+           is set. Gate uses strict `=== null` so seed offices (field
+           undefined in legacy data) are NOT falsely flagged.
+       (C) setup_completed_at added to the office-row SELECT in loadAll()
+           and propagated through the row mapper. createOfficeSubscription
+           already set it to null on new in-memory rows (patch 1).
+       (D) tag-neactivat style + neactivat-dot CSS + @keyframes
+           neactivatPulse (1.4s ease-in-out, scale .75→1, opacity .4→1).
+       Old "Trimite link card pe email" button untouched per George's call
+       (flag deferred — may revisit if Stripe-card-recovery moves under
+       the new B2B email layer in a later round).
+       This commit completes Round 2's frontend scope. Full smoke next:
+         1. Create office (re-test Stripe-less flow vs earlier 500s).
+         2. Verify red dot + Neactivat pill on new row.
+         3. Click new "Retrimite link de activare" — toast lands, email
+            arrives, visual cue stays.
+         4. Verify dot + pill disappear after notary signs in (requires
+            N073 master-side to be live, OR manual flip of setup_completed_at
+            via SQL to verify the visual).
+         5. Re-smoke Suspend / Dezactivează / Reactivează (already PASS
+            in v44.2 smoke; quick re-check on fresh test office).
+
   v44.3: Search-chip dropdown UX fix. Previously the Suspendat/Dezactivat
        chips (and Anulat/Finalizat chips on the Dosare view) stayed visible
        until the admin backspaced the trigger text away. Now they hide on:
@@ -822,6 +859,14 @@ html,body{background:var(--white);color:var(--ink);font-family:var(--sans);font-
 .tag-acoperit{background:var(--ink);color:var(--white);border-color:var(--ink);}
 .tag-lipsa{background:none;color:var(--red);border-color:var(--red);}
 .tag-arhivat{background:none;color:var(--grey2);border-color:var(--rule);}
+/* v44.4 — Neactivat visual cue. Office row pill + a small pulsating red
+   dot next to the office name. Both show only when setup_completed_at is
+   NULL AND lifecycle_status='active' (admin created the office, notary
+   hasn't logged in yet to set their password). Both disappear together
+   once setup_completed_at is set. */
+.tag-neactivat{background:var(--red-lt);color:var(--red);border-color:var(--red);}
+.neactivat-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--red);margin-right:8px;vertical-align:middle;flex-shrink:0;animation:neactivatPulse 1.4s ease-in-out infinite;}
+@keyframes neactivatPulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.4;transform:scale(.75);}}
 /* doc-chips identical to v48 */
 .doc-chip{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;letter-spacing:.5px;text-transform:uppercase;padding:4px 10px;background:var(--ink);color:var(--white);border:1px solid var(--ink);cursor:pointer;transition:opacity .15s;white-space:nowrap;line-height:1.2;}
 .doc-chip:hover{opacity:.85;}
@@ -1919,6 +1964,12 @@ html,body{background:var(--white);color:var(--ink);font-family:var(--sans);font-
           <div class="field-stacked field-stacked-plain"><div class="field-stacked-inner"><span class="fs-lbl">Reducere</span><span class="fs-val" id="of-discount">—</span></div></div>
           <!-- Resend setup-link button: visible only when status='incomplete'. -->
           <div class="field-stacked field-stacked-plain" id="of-resend-row" style="display:none;"><div class="field-stacked-inner"><span class="fs-lbl">Link card</span><span class="fs-val"><button class="cdd-trigger" type="button" id="of-resend-btn" style="border-bottom:none;padding:0;text-align:left;cursor:pointer;">Trimite link card pe email ⟶</button></span></div></div>
+          <!-- v44.4 — Retrimite link de activare. Visible only when notary
+               has NOT yet logged in (setup_completed_at IS NULL) AND office
+               is active (lifecycle_status='active'). Fires resend-notary-invite
+               EF, which regenerates the auth invite link + sends the
+               notary_setup_link_resent template. -->
+          <div class="field-stacked field-stacked-plain" id="of-resend-invite-row" style="display:none;"><div class="field-stacked-inner"><span class="fs-lbl">Activare</span><span class="fs-val"><button class="cdd-trigger" type="button" id="of-resend-invite-btn" style="border-bottom:none;padding:0;text-align:left;cursor:pointer;">Retrimite link de activare ⟶</button></span></div></div>
         </div>
         <!-- Pane: Statistici -->
         <div id="om-det-pane-stat" class="lib-pane" style="display:none;">
@@ -2681,7 +2732,7 @@ function loadAll(){
   // the dashboard's display-label dropdown. Master chat lock (Q4 answer): option (a),
   // dashboard reads act_subtypes directly via RLS policy act_subtypes_read.
   Promise.all([
-    sb.from('notary_offices').select('id,name,city,address,contact_name,contact_email,contact_phone,lifecycle_status,plan,subscription_status,created_at'),
+    sb.from('notary_offices').select('id,name,city,address,contact_name,contact_email,contact_phone,lifecycle_status,plan,subscription_status,setup_completed_at,created_at'),
     sb.from('office_templates').select('*').eq('status','active'),
     sb.from('act_subtypes').select('id,act_type,subtype_key,label:subtype_label_ro,display_order').eq('active',true)
   ]).then(function(results){
@@ -2712,7 +2763,8 @@ function loadAll(){
           contact_phone:o.contact_phone||'',
           plan:o.plan||null,
           subscription_status:o.subscription_status||null,
-          lifecycle_status:o.lifecycle_status
+          lifecycle_status:o.lifecycle_status,
+          setup_completed_at:o.setup_completed_at||null
         };
       });
       // Cases: loaded per-office on demand (see loadCasesForOffice).
@@ -2905,7 +2957,7 @@ var LIFECYCLE_SEARCH_MAP={
   activ:'active',active:'active'
 };
 // Display labels for lifecycle_status enum (parallel to CHANNEL_LABELS / EVENT_LABELS pattern).
-var LIFECYCLE_LABELS={active:'Activ',suspended:'Suspendat',archived:'Dezactivat'};
+var LIFECYCLE_LABELS={active:'Activ',suspended:'Suspendat',archived:'Dezactivat',neactivat:'Neactivat'};
 var CASE_STATUS_SEARCH_MAP={
   anulat:'anulat',anulate:'anulat',
   finalizat:'finalizat',finalizate:'finalizat'
@@ -2966,14 +3018,34 @@ function renderA(){
     html+='<div class="list-row-office" data-oid="'+h(o.id)+'">';
     html+='<div class="l-num">'+pad(i+1)+'</div>';
     // item 8: no o-sub (notary name removed)
-    html+='<div><div class="o-name">'+h(o.name)+'</div></div>';
+    // v44.4 — Neactivat visual cue: admin created the office but notary
+    // hasn't logged in yet to set their password. Gate: setup_completed_at
+    // IS NULL AND lifecycle_status='active'. Suspended/archived offices
+    // don't get the dot — their status pill already shows the lifecycle.
+    // NOTE: gate uses strict `=== null` (not `!`) so seed offices where
+    // setup_completed_at is `undefined` (legacy seed mode, field absent)
+    // are NOT treated as Neactivat. Only DB rows with an explicit NULL or
+    // newly-created in-memory rows (where we set it to null) qualify.
+    var isNeactivat=(o.lifecycle_status==='active'||!o.lifecycle_status)&&o.setup_completed_at===null;
+    var nameDot=isNeactivat?'<span class="neactivat-dot" title="Notarul nu s-a autentificat încă"></span>':'';
+    html+='<div><div class="o-name">'+nameDot+h(o.name)+'</div></div>';
     html+='<div class="l-client">'+h(o.city)+'</div>';
     html+='<div class="o-progress"><div class="o-prog-bar"><div class="o-prog-fill" style="width:'+pct+'%"></div></div><span class="o-prog-count">'+cov.covered+' / '+cov.target+'</span></div>';
     html+='<div class="l-date"><span class="l-date-main">'+cs.length+'</span><span class="l-date-slot"> dosare</span></div>';
     var lcs=o.lifecycle_status;
-    var statusCell=(lcs==='suspended')
-      ? '<span class="tag tag-avertisment">'+LIFECYCLE_LABELS.suspended+'</span>'
-      : (lcs==='archived' ? '<span class="tag tag-arhivat">'+LIFECYCLE_LABELS.archived+'</span>' : officeStatusTag(o.status));
+    var statusCell;
+    if(lcs==='suspended'){
+      statusCell='<span class="tag tag-avertisment">'+LIFECYCLE_LABELS.suspended+'</span>';
+    } else if(lcs==='archived'){
+      statusCell='<span class="tag tag-arhivat">'+LIFECYCLE_LABELS.archived+'</span>';
+    } else if(isNeactivat){
+      // Replace ACTIV with NEACTIVAT pill — same row, one tag at a time, no
+      // contradiction with the dot. Pill disappears together with the dot
+      // once notary logs in (setup_completed_at gets set).
+      statusCell='<span class="tag tag-neactivat">'+LIFECYCLE_LABELS.neactivat+'</span>';
+    } else {
+      statusCell=officeStatusTag(o.status);
+    }
     html+='<div class="l-status">'+statusCell+'</div>';
     html+='</div>';
   });
@@ -3133,6 +3205,19 @@ function renderOfficeAbon(o){
     resendRow.style.display='';
   } else {
     resendRow.style.display='none';
+  }
+  // v44.4 — Retrimite link de activare row. Visible only when the notary
+  // has NOT yet logged in (setup_completed_at IS NULL) AND office is active
+  // (lifecycle_status='active'). Strict `=== null` so seed offices with the
+  // field undefined don't accidentally trigger.
+  var resendInviteRow=document.getElementById('of-resend-invite-row');
+  if(resendInviteRow){
+    var lcsForInvite=o.lifecycle_status||'active';
+    if(lcsForInvite==='active'&&o.setup_completed_at===null){
+      resendInviteRow.style.display='';
+    } else {
+      resendInviteRow.style.display='none';
+    }
   }
 }
 
@@ -6082,6 +6167,84 @@ document.getElementById('of-plan').addEventListener('change',function(){
       } else {
         showToast('Trimitere eșuată (cod: '+code+').');
       }
+    });
+  });
+})();
+// v44.4 — Retrimite link de activare button (new, separate from the older
+// "Trimite link card" button above). Calls resend-notary-invite EF.
+// Gate: setup_completed_at IS NULL AND lifecycle_status='active' (controlled
+// by renderOfficeAbon visibility — button only shows when gate is open).
+// Confirmation dialog per archive spec. The visual cue (red dot + Neactivat
+// pill) does NOT change after a successful send — it persists until the
+// notary actually logs in and setup_completed_at flips. Re-sending just
+// re-fires the email; doesn't change office state.
+(function wireResendInvite(){
+  var btn=document.getElementById('of-resend-invite-btn');
+  if(!btn)return;
+  var defaultLabel='Retrimite link de activare ⟶';
+  btn.addEventListener('click',function(){
+    if(btn.disabled||!currentOfficeId)return;
+    var o=OM[currentOfficeId];if(!o)return;
+    var email=o.contact_email||o.email||'';
+    // Confirmation modal — native confirm() per archive spec wording.
+    if(!confirm('Trimite din nou link-ul de activare către '+email+'?'))return;
+    btn.disabled=true;
+    btn.style.opacity='.5';
+    btn.style.cursor='not-allowed';
+    btn.textContent='Se trimite...';
+    sb.functions.invoke('resend-notary-invite',{body:{office_id:currentOfficeId}}).then(function(efRes){
+      if(efRes.error){
+        var resp=efRes.error.context;
+        var status=(resp&&resp.status)||0;
+        var bodyPromise=resp&&typeof resp.json==='function'
+          ? resp.clone().json().catch(function(){return resp.clone().text().then(function(t){return {error:'unparseable_body',raw:t};});})
+          : Promise.resolve({});
+        bodyPromise.then(function(b){
+          b=b||{};
+          var code=b.error||'unknown_error';
+          var msg;
+          if(status>=400&&status<500){
+            if(code==='office_not_found'){
+              msg='Biroul nu a fost găsit.';
+            } else if(code==='already_completed'){
+              msg='Notarul s-a autentificat deja.';
+            } else if(code==='no_contact_email_on_file'){
+              msg='Lipsește emailul de contact.';
+            } else if(code==='office_not_active'){
+              msg='Biroul nu este activ.';
+            } else {
+              msg='Trimitere respinsă (cod: '+code+').';
+            }
+          } else {
+            console.error('[resend-notary-invite] '+status+' error',code,b);
+            msg='Eroare. Încearcă din nou.';
+          }
+          showToast(msg);
+          btn.disabled=false;
+          btn.style.opacity='';
+          btn.style.cursor='';
+          btn.textContent=defaultLabel;
+        });
+        return;
+      }
+      var b=efRes.data||{};
+      if(!b.ok){
+        console.error('[resend-notary-invite] 2xx but ok:false',b);
+        showToast('Răspuns neașteptat. Vezi consola.');
+      } else {
+        showToast('Link de activare trimis către '+email+'.');
+      }
+      btn.disabled=false;
+      btn.style.opacity='';
+      btn.style.cursor='';
+      btn.textContent=defaultLabel;
+    }).catch(function(err){
+      console.error('[resend-notary-invite] invoke threw',err);
+      showToast('Eroare rețea — încearcă din nou.');
+      btn.disabled=false;
+      btn.style.opacity='';
+      btn.style.cursor='';
+      btn.textContent=defaultLabel;
     });
   });
 })();
