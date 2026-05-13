@@ -1,7 +1,46 @@
 <!DOCTYPE html>
 <!--
-  acte.legal — Admin Dashboard v42
+  acte.legal — Admin Dashboard v44
   Visual system: identical to notariat_dashboard_v48.html
+  v44: Round 2 of B2B email/lifecycle wiring (master v44 N072 EFs ready,
+       admin v43 closed idle by design, admin v44 picks up). Five EFs
+       wired via sb.functions.invoke():
+         create-notary-office       (replaces admin-create-office-subscription)
+         resend-notary-invite       (new "Retrimite link" button)
+         suspend-notary-office      (Status sub-tab Suspendă)
+         deactivate-notary-office   (Status sub-tab Dezactivează)
+         reactivate-notary-office   (Status sub-tab Reactivează)
+       Patch 1 (this commit): createOfficeSubscription + submitOfficeCreation
+         rewritten for new Stripe-less EF. Old EF
+         admin-create-office-subscription did Stripe customer + subscription
+         at create time; new create-notary-office is Stripe-less by design
+         (master v45 reply Q1(a) — notary self-configures billing post-
+         activation via separate notary-side EF, master-owned, post-launch).
+         New EF response: { ok, office_id, user_id, email_log_id }.
+         No Stripe fields, no setup_url. Welcome email is folded into the
+         EF (no separate sendSetupLinkEmail call needed).
+         In-memory row built with subscription_status:null, stripe_*:null,
+         lifecycle_status:'active', setup_completed_at:null. The latter
+         drives patch 2's "Neactivat" visual cue.
+         Body sends plan + billing_cycle as admin's pre-selection (notary
+         can change later via their own billing flow; mirror writes back
+         to notary_offices.plan visible via refreshOfficeSubscription on
+         next office-detail open — master v45 reply Q1(b,d)).
+         Error toast mapping: 4xx → user-actionable Romanian (missing_field
+         with field name); 5xx → generic "Eroare. Încearcă din nou." +
+         console.error (master toast mapping spec, archive §1).
+       Patches 2–3 (next commits): Suspend/Deactivate/Reactivate rewires,
+       new "Retrimite link" button + "Neactivat" visual cue, smoke.
+       Locks carried from v42 untouched (β2 dup-role filter, validTokensFor,
+       ROLES_BY_ACT fallback, ANAF CUI checksum removal, EXTRAS_CACHE,
+       ROLES_CACHE, Path B RPC contract). No changes to template-validator
+       paths. Forbidden list per v42 handoff Section 7 still in force.
+       N074 (Motiv lifecycle audit persistence) tracked as master debt —
+       admin keeps Motiv as local-only with TODO comment per master v45
+       reply Q3.
+       N075 (plan/billing_cycle persistence spot-check) — master will
+       verify quietly; admin frontend body contract is forward-compatible.
+
   v42: ONE bug fix (master chat v43 work order 2026-05-12, N065 closure).
        D007 priority 1.3 (un_parinte template upload) was blocked: admin
        v41's validator rejected 9 universal PARINTE_* tokens as
@@ -5430,85 +5469,102 @@ function collectOfficePayload(){
     plan:document.getElementById('co-plan').value
   };
 }
-// v29 / Phase 1.2 (Fix B): createOfficeSubscription is now a single Edge Function call.
-// Master chat moved the notary_offices insert INTO admin-create-office-subscription
-// (service-role write) because RLS blocks anon-role inserts and adding a permissive
-// policy was the wrong trade-off. Frontend posts the full office payload + tier; the
-// Edge Function inserts the office row, creates Stripe customer + subscription,
-// inserts office_subscriptions, and returns office_id + Stripe state.
+// v44 / Round 2 (N072): createOfficeSubscription now calls the new B2B Edge
+// Function `create-notary-office` via supabase.functions.invoke(). The EF:
+//   1. Inserts notary_offices row (admin's pre-selected plan + billing_cycle
+//      stored as the recommendation; notary can change later in their own
+//      billing flow per master v45 reply Q1(d) — mirror writes back via
+//      refreshOfficeSubscription on next office-detail open).
+//   2. Generates Supabase Auth invite link (sets setup_completed_at = NULL).
+//   3. Inserts notary_office_users link row.
+//   4. Sends `notary_welcome` email via render_and_send_b2b_email RPC
+//      (no separate sendSetupLinkEmail call needed — folded in).
 //
-// CUI is the idempotency key — same CUI returns 409 office_with_cui_already_exists
-// with the existing office_id surfaced in the response body.
+// Stripe is intentionally NOT touched here. Notary self-configures billing
+// post-activation via a separate notary-side EF (master-owned, post-launch).
+// Per master v45 reply Q1(a–c).
 //
-// Until SUPA_KEY is set, falls back to simulateZapier (seed mode) —
-// preserves v27 behavior for non-Supabase / no-key environments.
+// Response: { ok, office_id, user_id, email_log_id }.
+// No stripe_customer_id, stripe_subscription_id, subscription_status,
+// trial_ends_at, current_period_end, setup_url in the response — those are
+// populated later via the notary-side billing flow + webhook.
+//
+// Errors:
+//   400 missing_field (with `field`)
+//   500 office_insert_failed | generate_link_failed | email_queue_failed
+//
+// `plan` + `billing_cycle` are sent in body as optional pre-selection.
+// Master spot-checks persistence (logged as N075); contract is forward-
+// compatible — if EF currently drops them, master will patch transparently.
+//
+// Until SUPA_KEY is set, falls back to simulateZapier (seed mode).
 function createOfficeSubscription(payload,cb){
   if(!SUPA_KEY){
     return simulateZapier(payload,cb);
   }
-  // Build the locked input shape: { office: {...}, tier }.
-  // contact_role / contact_phone are optional — only include if non-empty so the
-  // Edge Function's required-field check doesn't trip on whitespace/null.
-  var office={
+  // Build the new EF body shape per admin_to_master_v43_b2b_scope_split_ack.md §1.
+  // Required: name, city, address, contact_name, contact_email.
+  // Optional: contact_phone, cui, name_display, plan, billing_cycle.
+  // name_display defaults to name in the EF if not supplied.
+  var body={
     name:payload.name,
-    cui:payload.cui,
     city:payload.city,
     address:payload.address,
     contact_name:payload.contact_name,
     contact_email:payload.contact_email
   };
-  if(payload.contact_role)office.contact_role=payload.contact_role;
-  if(payload.contact_phone)office.contact_phone=payload.contact_phone;
-  edgeFetch(EDGE_FN.createOfficeSubscription,{
-    office:office,
-    tier:payload.plan
-  }).then(function(efRes){
-    var b=efRes.body||{};
-    if(!efRes.ok){
-      // Typed error codes per master chat v3 contract:
-      // 400 office_payload_required / office_field_required (with `field`) /
-      //     tier_required / invalid_tier
-      // 409 office_with_cui_already_exists (with existing office_id)
-      // 500 office_insert_failed (with detail) / config_load_failed /
-      //     stripe_price_not_configured / db_insert_failed (with stripe_state_committed)
-      // 502 stripe_customer_create_failed / stripe_subscription_create_failed
+  if(payload.contact_phone)body.contact_phone=payload.contact_phone;
+  if(payload.cui)body.cui=payload.cui;
+  if(payload.plan)body.plan=payload.plan;
+  // billing_cycle: form has no picker yet — admin's pre-selection defaults to
+  // 'monthly'. Sent so EF can persist as pre-selection (per master Q1(b)).
+  body.billing_cycle='monthly';
+
+  sb.functions.invoke('create-notary-office',{body:body}).then(function(efRes){
+    // supabase-js shape: { data, error }. error is non-null on non-2xx.
+    if(efRes.error){
+      // efRes.error is a FunctionsHttpError / FunctionsRelayError. Try to read
+      // the parsed body via efRes.data (some clients populate both); else fall
+      // back to the error message + context.
+      var b=(efRes.data&&typeof efRes.data==='object')?efRes.data:{};
+      var status=(efRes.error.context&&efRes.error.context.status)||0;
       var code=b.error||'unknown_error';
       var msg;
-      if(code==='unknown_error'){
-        // The Edge Function returned a non-OK status but no recognized error
-        // code. Surface the HTTP status + raw body so the admin can diagnose
-        // (and report back to master chat if this becomes recurring).
-        console.error('[createOfficeSubscription] non-OK response with no error code. status=',efRes.status,'body=',b);
-        msg='Răspuns neașteptat de la server (status '+efRes.status+'). Vezi consola pentru detalii.';
-      } else if(code==='network_error'){
-        msg='Eroare rețea/CORS. Verifică conexiunea sau deschide dashboard-ul de pe domeniul autorizat (nu file://). Vezi consola pentru detalii.';
-      } else if(code==='office_with_cui_already_exists'){
-        msg='Birou cu acest CUI există deja.';
-      } else if(code==='office_field_required'&&b.field){
-        msg='Câmp obligatoriu lipsă: '+b.field+'.';
-      } else if(code==='invalid_tier'){
-        msg='Plan invalid.';
-      } else if(b.stripe_state_committed){
-        msg='Stripe creat, dar înregistrarea în baza de date a eșuat. Webhook-ul va reconcilia. (cod: '+code+')';
+      // 4xx → user-actionable Romanian (per master toast mapping spec).
+      // 5xx → generic + console.error.
+      if(status>=400&&status<500){
+        if(code==='missing_field'&&b.field){
+          msg='Câmp obligatoriu lipsă: '+b.field+'.';
+        } else {
+          msg='Date invalide. Verifică formularul.';
+        }
       } else {
-        msg='Crearea biroului a eșuat (cod: '+code+').';
+        // 5xx — generic; surface code in console for debugging.
+        console.error('[create-notary-office] 5xx error',code,b,efRes.error);
+        msg='Eroare. Încearcă din nou.';
       }
-      cb({ok:false,message:msg,code:code,office_id:b.office_id||null});
+      cb({ok:false,message:msg,code:code});
       return;
     }
+    var b=efRes.data||{};
+    if(!b.ok){
+      // EF returned 2xx but ok:false (defensive — shouldn't happen per contract).
+      console.error('[create-notary-office] 2xx but ok:false',b);
+      cb({ok:false,message:'Răspuns neașteptat. Vezi consola.',code:'unexpected_response'});
+      return;
+    }
+    // New EF response shape: { ok, office_id, user_id, email_log_id }.
+    // No Stripe fields — by design (see header comment).
     cb({
       ok:true,
       office_id:b.office_id,
-      stripe_customer_id:b.stripe_customer_id||null,
-      stripe_subscription_id:b.stripe_subscription_id||null,
-      subscription_status:b.subscription_status||'active',
-      trial_ends_at:null, // populated by webhook on customer.subscription.created
-      current_period_end:'—', // populated by webhook
-      setup_url:b.setup_url||null,
-      setup_link_sent:b.setup_link_sent||false
+      user_id:b.user_id||null,
+      email_log_id:b.email_log_id||null
     });
   }).catch(function(err){
-    cb({ok:false,message:'Eroare rețea: '+String(err)});
+    // Network / CORS / unexpected runtime errors.
+    console.error('[create-notary-office] invoke threw',err);
+    cb({ok:false,message:'Eroare rețea. Încearcă din nou.',code:'network_error'});
   });
 }
 // Seed-mode simulator — kept as fallback for environments without legacy JWT
@@ -5564,7 +5620,12 @@ function submitOfficeCreation(){
       soundErr();
       return;
     }
-    // Build the in-memory office row matching SEED_OFFICES shape.
+    // v44 / Round 2: build in-memory row from the new EF response shape.
+    // Stripe fields are intentionally absent — populated later via notary-side
+    // billing flow + refreshOfficeSubscription() mirror read on next office-
+    // detail open (per master v45 reply Q1(d)).
+    // setup_completed_at:null + lifecycle_status:'active' drive the new
+    // "Neactivat" visual cue (patch 2).
     var nowMonth=['Ian','Feb','Mar','Apr','Mai','Iun','Iul','Aug','Sep','Oct','Noi','Dec'][new Date().getMonth()];
     var since=nowMonth+' '+new Date().getFullYear();
     var row={
@@ -5574,7 +5635,7 @@ function submitOfficeCreation(){
       notary:payload.contact_name||payload.name,
       email:payload.contact_email,
       phone:payload.contact_phone||'',
-      status:res.subscription_status==='past_due'?'avertisment':'activ',
+      status:'activ',
       since:since,
       address:payload.address||'',
       cui:payload.cui,
@@ -5582,40 +5643,25 @@ function submitOfficeCreation(){
       contact_role:payload.contact_role||'',
       contact_email:payload.contact_email,
       contact_phone:payload.contact_phone||'',
-      subscription_status:res.subscription_status,
-      plan:payload.plan,
-      billing_cycle:'monthly',
-      current_period_end:res.current_period_end||'—',
-      trial_ends_at:res.trial_ends_at,
-      stripe_customer_id:res.stripe_customer_id,
-      stripe_subscription_id:res.stripe_subscription_id
+      subscription_status:null, // populated later by notary-side billing flow
+      plan:payload.plan, // admin's pre-selection; notary can change post-activation
+      billing_cycle:'monthly', // admin's pre-selection
+      current_period_end:'—',
+      trial_ends_at:null,
+      stripe_customer_id:null,
+      stripe_subscription_id:null,
+      lifecycle_status:'active',
+      setup_completed_at:null // patch 2 visual cue driver
     };
     OFFICES.push(row);
     OM[row.id]=row;
     _coSubmitting=false;
     validateOfficeForm();
     soundFinalizat();
-    // v34: setup-link delivery now via edgeFetch to admin-send-setup-link-email.
-    // Master verified the Edge Function end-to-end before this swap. Two-toast
-    // pattern: optimistic "Trimit emailul..." immediate, success/failure toast
-    // when the fire-and-forget call returns. complimentary_partner branch
-    // unchanged (no Stripe subscription, no setup link).
-    if(res.setup_url&&payload.plan!=='complimentary_partner'){
-      showToast('Birou creat. Trimit emailul de bun venit...');
-      edgeFetch(EDGE_FN.sendSetupLinkEmail,{office_id:row.id}).then(function(efRes){
-        if(efRes.ok){
-          showToast('Email trimis către '+payload.contact_email+'.');
-        } else {
-          var err=(efRes.body&&efRes.body.error)||'unknown';
-          console.error('[sendSetupLinkEmail] failed',err,efRes.status);
-          showToast('Birou creat, dar emailul nu a putut fi trimis ('+err+'). Folosește "Trimite link card" din panoul biroului.');
-        }
-      });
-    } else if(payload.plan==='complimentary_partner'){
-      showToast('Birou creat. Cont Partner — fără abonament Stripe.');
-    } else {
-      showToast('Birou creat.');
-    }
+    // v44 / Round 2: welcome email is fired by `create-notary-office` EF
+    // itself (folded in — no separate sendSetupLinkEmail call needed).
+    // Single toast confirms creation + email dispatch.
+    showToast('Birou creat. Email de activare trimis către '+payload.contact_email+'.');
     // Close + refresh
     document.getElementById('om-create-overlay').classList.remove('open');
     document.getElementById('om-create').classList.remove('open');
