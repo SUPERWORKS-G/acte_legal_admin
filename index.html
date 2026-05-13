@@ -5523,27 +5523,36 @@ function createOfficeSubscription(payload,cb){
   sb.functions.invoke('create-notary-office',{body:body}).then(function(efRes){
     // supabase-js shape: { data, error }. error is non-null on non-2xx.
     if(efRes.error){
-      // efRes.error is a FunctionsHttpError / FunctionsRelayError. Try to read
-      // the parsed body via efRes.data (some clients populate both); else fall
-      // back to the error message + context.
-      var b=(efRes.data&&typeof efRes.data==='object')?efRes.data:{};
-      var status=(efRes.error.context&&efRes.error.context.status)||0;
-      var code=b.error||'unknown_error';
-      var msg;
-      // 4xx → user-actionable Romanian (per master toast mapping spec).
-      // 5xx → generic + console.error.
-      if(status>=400&&status<500){
-        if(code==='missing_field'&&b.field){
-          msg='Câmp obligatoriu lipsă: '+b.field+'.';
+      // FunctionsHttpError carries the raw Response in error.context. We need
+      // to read its body manually — supabase-js does NOT auto-parse non-2xx
+      // bodies. Without this, `efRes.data` is empty and we can't see the EF's
+      // actual error code.
+      var resp=efRes.error.context;
+      var status=(resp&&resp.status)||0;
+      // resp.json() returns a Promise. Chain it so we can surface the real
+      // error code in toast + console.
+      var bodyPromise=resp&&typeof resp.json==='function'
+        ? resp.clone().json().catch(function(){return resp.clone().text().then(function(t){return {error:'unparseable_body',raw:t};});})
+        : Promise.resolve({});
+      bodyPromise.then(function(b){
+        b=b||{};
+        var code=b.error||'unknown_error';
+        var msg;
+        // 4xx → user-actionable Romanian (per master toast mapping spec).
+        // 5xx → generic + console.error with full detail.
+        if(status>=400&&status<500){
+          if(code==='missing_field'&&b.field){
+            msg='Câmp obligatoriu lipsă: '+b.field+'.';
+          } else {
+            msg='Date invalide. Verifică formularul.';
+          }
         } else {
-          msg='Date invalide. Verifică formularul.';
+          // 5xx — generic toast; full body in console for master debugging.
+          console.error('[create-notary-office] '+status+' error',code,b);
+          msg='Eroare. Încearcă din nou.';
         }
-      } else {
-        // 5xx — generic; surface code in console for debugging.
-        console.error('[create-notary-office] 5xx error',code,b,efRes.error);
-        msg='Eroare. Încearcă din nou.';
-      }
-      cb({ok:false,message:msg,code:code});
+        cb({ok:false,message:msg,code:code});
+      });
       return;
     }
     var b=efRes.data||{};
