@@ -1,7 +1,22 @@
 <!DOCTYPE html>
 <!--
-  acte.legal — Admin Dashboard v44.5
+  acte.legal — Admin Dashboard v45
   Visual system: identical to notariat_dashboard_v48.html
+  v45: N080 — Wire admin CASES list to live database.
+       Replaces `CASES=SEED_CASES; // placeholder` (line ~2786 of v44.5) with
+       a 4th element on the boot Promise.all calling `sb.rpc('get_admin_all_cases')`.
+       Master shipped the RPC (path b chosen over direct SELECT for symmetry
+       with notary side's `get_office_cases`, and to absorb future schema drift
+       inside the RPC). Returns 17 columns: 16 from notary RPC + `office_id` at
+       front. RLS-gated: admin role only; non-admin callers get empty result set.
+       Sort: created_at DESC. Cancelled cases excluded server-side.
+       In-memory shape preserved verbatim from SEED_CASES (id, oid, type, act,
+       subtype, ref, client, status, urgent, pref, created) so downstream code
+       (CASES.filter / CASES.find / KPI tiles / per-office "X dosare" counters
+       / filter tabs) doesn't change. `urgent` defaults to false until master
+       adds it to the RPC. Seed-fallback path (offRes.error → SEED_CASES) kept
+       intact for the "infra not yet live" cold case.
+
   v44.5: Post-patch-3 hot-fix. v44.4 smoke surfaced create-notary-office
        returning HTTP 500 with `error: "generate_link_failed"` when the
        contact_email already exists in auth.users. Frontend was treating
@@ -2748,9 +2763,10 @@ function loadAll(){
   Promise.all([
     sb.from('notary_offices').select('id,name,city,address,contact_name,contact_email,contact_phone,lifecycle_status,plan,subscription_status,setup_completed_at,created_at'),
     sb.from('office_templates').select('*').eq('status','active'),
-    sb.from('act_subtypes').select('id,act_type,subtype_key,label:subtype_label_ro,display_order').eq('active',true)
+    sb.from('act_subtypes').select('id,act_type,subtype_key,label:subtype_label_ro,display_order').eq('active',true),
+    sb.rpc('get_admin_all_cases')   // v45 N080: live cases wire (replaces SEED_CASES placeholder)
   ]).then(function(results){
-    var offRes=results[0], tplRes=results[1], subRes=results[2];
+    var offRes=results[0], tplRes=results[1], subRes=results[2], caseRes=results[3];
     if(offRes.error||!offRes.data||offRes.data.length===0){
       // Infra not yet live — use seeds
       setDbBanner(false,'Mod validare — date demonstrative (Supabase: infrastructură în pregătire)');
@@ -2781,9 +2797,46 @@ function loadAll(){
           setup_completed_at:o.setup_completed_at||null
         };
       });
-      // Cases: loaded per-office on demand (see loadCasesForOffice).
-      // For KPI + today list we do a lightweight fetch of all cases once:
-      CASES=SEED_CASES; // placeholder until cases table confirmed in schema
+      // v45 N080: live cases wire. RPC `get_admin_all_cases` returns 17-col rows
+      // (16 from notary's get_office_cases + office_id at front). RLS-gated: admin
+      // role only; non-admin callers get empty result set silently. Sort: newest first.
+      // Cancelled rows excluded server-side (matches get_office_cases behaviour).
+      // On RPC error: log + fall through to empty array (KPIs show 0, downstream
+      // CASES.filter / CASES.find return nothing — strictly worse than seeds but
+      // honest; the seed-fallback path on line ~2758 covers the cold "infra not yet
+      // live" case via the offRes.error branch above).
+      if(caseRes && !caseRes.error && Array.isArray(caseRes.data)){
+        var ACT_LABEL_FROM_TYPE = {procuri:'Procură',declaratii:'Declarație',acorduri:'Acord',legalizari:'Legalizare'};
+        CASES = caseRes.data.map(function(row){
+          var prefDisplay = '—';
+          if(row.preferred_at){
+            try{
+              var d = new Date(row.preferred_at);
+              prefDisplay = d.toLocaleDateString('ro-RO',{day:'numeric',month:'short',year:'numeric'}) + ', ' + d.toLocaleTimeString('ro-RO',{hour:'2-digit',minute:'2-digit'});
+            }catch(e){ prefDisplay = '—'; }
+          }
+          var createdDisplay = '—';
+          if(row.created_at){
+            try{ createdDisplay = new Date(row.created_at).toLocaleDateString('ro-RO',{day:'numeric',month:'short',year:'numeric'}); }catch(e){ createdDisplay = '—'; }
+          }
+          return {
+            id: row.id,
+            oid: row.office_id,
+            type: row.act_type,
+            act: ACT_LABEL_FROM_TYPE[row.act_type] || (row.act_type||'—'),
+            subtype: row.subtype_label_ro || row.subtype_key || '—',
+            ref: row.ref || '—',
+            client: row.client_name || '—',
+            status: row.status_ui || 'nou',
+            urgent: false,   // RPC doesn't return urgent flag; default false until master adds it
+            pref: prefDisplay,
+            created: createdDisplay
+          };
+        });
+      } else {
+        if(caseRes && caseRes.error){ console.error('[v45 N080] get_admin_all_cases RPC error:', caseRes.error); }
+        CASES = [];
+      }
       // v31/v33: act_subtypes cache. Indexed three ways:
       //   ACT_SUBTYPES_BY_ID[id]                           = {id, act_type, subtype_key, label, display_order}
       //   ACT_SUBTYPES_BY_LABEL[act_type+'|'+normLabel(L)] = same row
