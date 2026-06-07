@@ -1,5 +1,22 @@
 <!DOCTYPE html>
 <!--
+  acte.legal — Admin Dashboard v46
+  Visual system: identical to notariat_dashboard_v48.html
+  v46: Tier display-label rename. Per master v51 brief: `Starter` → `Start`,
+       `Standard` → `Plus`. `Pro` unchanged. DATA VALUES UNCHANGED —
+       `data-v="starter"`, `data-v="standard"`, `data-v="pro"`, and all map
+       keys (`starter:`, `standard:`, `pro:`) preserved verbatim. This keeps
+       Supabase CHECK constraints, existing office rows, and the Stripe↔
+       dashboard mapping intact (zero migration). 5 edit sites: both `cdd`
+       plan dropdowns (of-plan ~line 1988, co-plan ~line 2175), `planLabel`
+       map (~line 3530), `PLAN_LABELS` map (~line 4662), trial auto-convert
+       note (line 2184 — "după 30 de zile se convertește automat la Start").
+       Site #5 (trial note) was beyond master's brief; George approved the
+       extension during v46 patching to keep all user-facing strings
+       consistent (otherwise the note would have said "...la Starter" while
+       the dropdown showed "Start"). Dev comments at lines 272 and 1252
+       still reference "Starter"/"Standard" — left alone, not user-facing.
+
   acte.legal — Admin Dashboard v45.1
   Visual system: identical to notariat_dashboard_v48.html
   v45.1: One-line follow-up to v45. Master shipped get_admin_all_cases v3
@@ -1985,8 +2002,8 @@ html,body{background:var(--white);color:var(--ink);font-family:var(--sans);font-
               <button class="cdd-trigger empty" type="button" style="border-bottom:none;padding:0;">—</button>
               <div class="cdd-panel" role="listbox">
                 <button class="cdd-opt" type="button" data-v="complimentary_trial">Trial 30 zile</button>
-                <button class="cdd-opt" type="button" data-v="starter">Starter</button>
-                <button class="cdd-opt" type="button" data-v="standard">Standard</button>
+                <button class="cdd-opt" type="button" data-v="starter">Start</button>
+                <button class="cdd-opt" type="button" data-v="standard">Plus</button>
                 <button class="cdd-opt" type="button" data-v="pro">Pro</button>
                 <button class="cdd-opt" type="button" data-v="complimentary_partner">Partner</button>
               </div>
@@ -2172,8 +2189,8 @@ html,body{background:var(--white);color:var(--ink);font-family:var(--sans);font-
               <button class="cdd-trigger empty" type="button" style="border-bottom:none;padding:0;">— selectează plan —</button>
               <div class="cdd-panel" role="listbox">
                 <button class="cdd-opt" type="button" data-v="complimentary_trial">Trial 30 zile</button>
-                <button class="cdd-opt" type="button" data-v="starter">Starter</button>
-                <button class="cdd-opt" type="button" data-v="standard">Standard</button>
+                <button class="cdd-opt" type="button" data-v="starter">Start</button>
+                <button class="cdd-opt" type="button" data-v="standard">Plus</button>
                 <button class="cdd-opt" type="button" data-v="pro">Pro</button>
                 <button class="cdd-opt" type="button" data-v="complimentary_partner">Partner</button>
               </div>
@@ -2181,7 +2198,7 @@ html,body{background:var(--white);color:var(--ink);font-family:var(--sans);font-
             </div>
           </div></div>
           <!-- Trial auto-convert note: visible only when complimentary_trial selected. -->
-          <div class="co-plan-note" id="co-plan-trial-note" style="display:none;">După 30 de zile se convertește automat la Starter.</div>
+          <div class="co-plan-note" id="co-plan-trial-note" style="display:none;">După 30 de zile se convertește automat la Start.</div>
           <div class="co-plan-note">La creare, Stripe generează clientul, abonamentul pe planul ales și trimite link-ul de checkout pe email-ul de contact.</div>
         </div>
       </div>
@@ -3527,7 +3544,7 @@ function renderCoReview(){
   // complimentary_partner) — previous mapping used stale trial_30d / complimentary
   // and silently fell through to '—' on every selection.
   var plan=(document.getElementById('co-plan')||{value:''}).value;
-  var planLabel={complimentary_trial:'Trial 30 zile',starter:'Starter',standard:'Standard',pro:'Pro',complimentary_partner:'Partner'}[plan]||'—';
+  var planLabel={complimentary_trial:'Trial 30 zile',starter:'Start',standard:'Plus',pro:'Pro',complimentary_partner:'Partner'}[plan]||'—';
   var dst=document.getElementById('co-rev-plan-label');
   if(dst)dst.value=planLabel;
 }
@@ -4659,7 +4676,7 @@ function updateOmStats(){
 // (trialing, incomplete) and full 5-tier set (complimentary_trial, complimentary_partner).
 // Legacy 'trial'/'complimentary' kept as aliases so existing seed rows continue rendering.
 var SUB_STATUS_LABELS={trial:'Trial',trialing:'Trial',active:'Activ',past_due:'Restanță',canceled:'Anulat',paused:'Suspendat',incomplete:'Incomplet'};
-var PLAN_LABELS={starter:'Starter',standard:'Standard',pro:'Pro',complimentary_trial:'Trial 30 zile',complimentary_partner:'Partner',trial_30d:'Trial 30 zile',complimentary:'Partner'};
+var PLAN_LABELS={starter:'Start',standard:'Plus',pro:'Pro',complimentary_trial:'Trial 30 zile',complimentary_partner:'Partner',trial_30d:'Trial 30 zile',complimentary:'Partner'};
 function subStatusLabel(s){return SUB_STATUS_LABELS[s]||'—';}
 function planLabel(p){return PLAN_LABELS[p]||'—';}
 
