@@ -1,5 +1,37 @@
 <!DOCTYPE html>
 <!--
+  acte.legal — Admin Dashboard v49
+  Visual system: identical to notariat_dashboard_v48.html
+  v49: Istoric plăți (billing-events history) tab + form-copy cleanup. Frontend only.
+       TRACK TAB — new "Istoric plăți" sub-tab inside Office Detail › DETALII,
+       between Abonament and Statistici:
+         (1) New button om-det-tab-istoric-plati + pane om-det-pane-istoric-plati;
+             setDetTab loop extended; switchDetTab renders on open (cache-first).
+         (2) renderBillingHistory(officeId, force) reads public.billing_events
+             DIRECTLY via sb (same pattern as office_subscriptions; RLS admin-read).
+             Admin only READS — master's sync webhook writes. Empty table is the
+             NORMAL state until that webhook is wired → graceful lib-empty
+             ("Nicio plată."), never an error.
+         (3) Rows reuse EXISTING primitives only (no new CSS classes): cm-log-row
+             (Date · Eveniment · [sub-pill + Sumă]); sub-pill + subStatusLabel for
+             status (incl. past_due red); fmtDate for the date; lib-empty for empty.
+             Amount: minor units / 100, no decimals when whole (200 RON; 199.50 RON);
+             status-only events show '—'. Newest first (created_at desc).
+         (4) #of-billing-list cap-scroll cloned verbatim from #om-dos-pane-prog
+             (max-height:400px; overflow-y:auto; hidden scrollbar) — scrolls when
+             long, compact when short (Active/Șabloane-style behaviour).
+         (5) Per-session cache _BILLING_CACHE (mirrors _DISCOUNT_CACHE); pre-warmed
+             on openOffice (fresh fetch) so the tab paints instantly on click.
+       FORM-COPY REMOVALS (master P1a follow-up):
+         (6) Removed the wrong "După 30 de zile se convertește automat la Start"
+             trial-note (conversion is a choice, not a forced auto-convert) + its
+             now-dead show/hide toggle in the co-plan change handler.
+         (7) Removed both "La creare, Stripe generează clientul… trimite link-ul
+             de checkout pe email" lines (no checkout link is emailed at creation).
+       NOT done (surfaced to George): onboarding "Link de checkout trimis" milestone
+         — outside master's stated 2-line scope; awaiting a one-question decision.
+       No RPC/schema/Stripe/email code. No locks touched.
+
   acte.legal — Admin Dashboard v48
   Visual system: identical to notariat_dashboard_v48.html
   v48: Office onboarding rewired to the merged EF + billing-view touch-ups
@@ -1229,6 +1261,9 @@ html,body{background:var(--white);color:var(--ink);font-family:var(--sans);font-
 #lib-pane-istoric,
 #om-dos-pane-attn,
 #om-dos-pane-prog{max-height:400px;overflow-y:auto;scrollbar-width:none;-ms-overflow-style:none;}
+/* v49: billing-events history list — cap-scroll cloned from #om-dos-pane-prog; padding-top:12px matches cm log panes' first-baseline alignment. */
+#of-billing-list{padding-top:12px;max-height:400px;overflow-y:auto;scrollbar-width:none;-ms-overflow-style:none;}
+#of-billing-list::-webkit-scrollbar{display:none;}
 #lib-pane-active::-webkit-scrollbar,
 #lib-pane-istoric::-webkit-scrollbar,
 #om-dos-pane-attn::-webkit-scrollbar,
@@ -2011,6 +2046,7 @@ html,body{background:var(--white);color:var(--ink);font-family:var(--sans);font-
           <button class="lib-tab active" id="om-det-tab-date" type="button" onclick="switchDetTab('date')">Date birou</button>
           <button class="lib-tab" id="om-det-tab-contact" type="button" onclick="switchDetTab('contact')">Persoană de contact</button>
           <button class="lib-tab" id="om-det-tab-abon" type="button" onclick="switchDetTab('abon')">Abonament</button>
+          <button class="lib-tab" id="om-det-tab-istoric-plati" type="button" onclick="switchDetTab('istoric-plati')">Istoric plăți</button>
           <button class="lib-tab" id="om-det-tab-stat" type="button" onclick="switchDetTab('stat')">Statistici</button>
         </div>
       </div>
@@ -2080,6 +2116,15 @@ html,body{background:var(--white);color:var(--ink);font-family:var(--sans);font-
           <div class="field-stacked field-stacked-plain"><div class="field-stacked-inner"><span class="fs-lbl">Urgențe</span><span class="fs-val mono" id="of-stat-urgente">—</span></div></div>
           <div class="field-stacked field-stacked-plain"><div class="field-stacked-inner"><span class="fs-lbl">Tipuri de acte acoperite</span><span class="fs-val mono" id="of-stat-tpl">—</span></div></div>
           <div class="field-stacked field-stacked-plain"><div class="field-stacked-inner"><span class="fs-lbl">Înregistrat</span><span class="fs-val mono" id="of-stat-since">—</span></div></div>
+        </div>
+        <!-- Pane: Istoric plăți (v49) — per-office billing-events history.
+             Reads public.billing_events directly via sb (same pattern as
+             office_subscriptions; RLS admin-read). Master owns the webhook that
+             WRITES events — until wired, the empty state is normal, not an error.
+             Rows reuse the existing cm-log-row log primitive + sub-pill + lib-empty.
+             #of-billing-list cap-scroll mirrors #om-dos-pane-prog. -->
+        <div id="om-det-pane-istoric-plati" class="lib-pane" style="display:none;">
+          <div id="of-billing-list"></div>
         </div>
       </div>
     </div>
@@ -2245,9 +2290,6 @@ html,body{background:var(--white);color:var(--ink);font-family:var(--sans);font-
               <input type="hidden" id="co-plan" value="">
             </div>
           </div></div>
-          <!-- Trial auto-convert note: visible only when complimentary_trial selected. -->
-          <div class="co-plan-note" id="co-plan-trial-note" style="display:none;">După 30 de zile se convertește automat la Start.</div>
-          <div class="co-plan-note">La creare, Stripe generează clientul, abonamentul pe planul ales și trimite link-ul de checkout pe email-ul de contact.</div>
         </div>
       </div>
 
@@ -2294,7 +2336,6 @@ html,body{background:var(--white);color:var(--ink);font-family:var(--sans);font-
           <!-- Pane: Plan (review) — read-only display of the chosen plan -->
           <div id="co-rev-pane-plan" class="lib-pane" style="display:none;">
             <div class="field-stacked field-stacked-plain"><div class="field-stacked-inner"><span class="fs-lbl">Plan abonament</span><input class="form-inp co-inp" id="co-rev-plan-label" style="border-bottom:none;padding:0;" disabled></div></div>
-            <div class="co-plan-note">La creare, Stripe generează clientul, abonamentul pe planul ales și trimite link-ul de checkout pe email-ul de contact.</div>
           </div>
         </div>
       </div>
@@ -3424,6 +3465,10 @@ function openOffice(oid){
     var fresh=OM[oid];
     if(fresh)renderOfficeAbon(fresh);
   });
+  // v49: pre-warm billing-events history (fresh fetch → cache) so the
+  // Istoric plăți sub-tab paints instantly on click. Renders into the
+  // hidden pane in the background; switchDetTab re-renders from cache.
+  renderBillingHistory(oid,true);
 }
 function closeOffice(){
   soundSwitch();
@@ -3475,7 +3520,7 @@ var tplView='active'; // 'active' | 'brute' | 'istoric'
 // ══ OFFICE-MODAL SUBTAB SWITCHERS (DETALII / DOSARE / ONBOARDING) ══════════
 // No persistence — always reset to first subtab on openOffice(). See resetOmSubtabs().
 function setDetTab(v){
-  ['date','contact','abon','stat'].forEach(function(t){
+  ['date','contact','abon','istoric-plati','stat'].forEach(function(t){
     var tab=document.getElementById('om-det-tab-'+t);
     var pane=document.getElementById('om-det-pane-'+t);
     if(tab) tab.classList.toggle('active',t===v);
@@ -3498,7 +3543,7 @@ function setObTab(v){
     if(pane) pane.style.display=(t===v?'block':'none');
   });
 }
-function switchDetTab(v){soundTabSwitch();setDetTab(v);}
+function switchDetTab(v){soundTabSwitch();setDetTab(v);if(v==='istoric-plati'){renderBillingHistory(currentOfficeId,false);}}
 function switchDosTab(v){soundTabSwitch();setDosTab(v);}
 function switchObTab(v){soundTabSwitch();setObTab(v);}
 // Reset all three subtabs to their first pane (silent). Called from openOffice().
@@ -6086,11 +6131,6 @@ document.getElementById('co-submit').addEventListener('click',advanceToReview);
 document.getElementById('co-submit-rev').addEventListener('click',submitOfficeCreation);
 document.getElementById('co-plan').addEventListener('change',function(){
   validateOfficeForm();
-  // v28: trial auto-convert note visibility — only when complimentary_trial selected.
-  var note=document.getElementById('co-plan-trial-note');
-  if(note){
-    note.style.display=document.getElementById('co-plan').value==='complimentary_trial'?'':'none';
-  }
 });
 // v29 / Phase 1.2 (round 2): existing-office Plan dropdown — wired to
 // admin-change-office-tier. Three behavioral paths per master chat contract:
@@ -6145,6 +6185,76 @@ function refreshOfficeSubscription(officeId,cb){
     console.error('[refreshOfficeSubscription] failed',err);
     if(cb)cb();
   });
+}
+
+// ── v49: BILLING-EVENTS HISTORY (Istoric plăți sub-tab) ──────────────────
+// Reads public.billing_events directly via sb (same established pattern as
+// refreshOfficeSubscription reads office_subscriptions; RLS admin-read mirrors
+// the office_subscriptions policy). Admin ONLY reads — master's sync webhook
+// writes. Until that webhook is wired AND real offices generate events, the
+// table is empty: the empty state is NORMAL, not an error. Per-session cache
+// keyed by office_id (mirrors _DISCOUNT_CACHE). Rows reuse the existing
+// cm-log-row log primitive; empty state reuses lib-empty; pill reuses sub-pill.
+var _BILLING_CACHE={};
+function fmtBillingAmount(amount,currency){
+  if(amount==null)return null;            // status event → caller shows '—'
+  var v=amount/100;                       // minor units (bani) → RON
+  var s=(v%1===0)?String(v):v.toFixed(2); // no decimals when whole (200 RON; 199.50 RON)
+  return s+' '+((currency||'ron').toUpperCase());
+}
+function renderBillingHistoryRows(list){
+  var el=document.getElementById('of-billing-list');
+  if(!el)return;
+  if(!list||!list.length){
+    el.innerHTML='<div class="lib-empty"><div class="lib-empty-line">Nicio plată.</div></div>';
+    return;
+  }
+  var html='';
+  list.forEach(function(ev){
+    var pill=ev.mapped_status
+      ? '<span class="sub-pill '+h(ev.mapped_status)+'">'+h(subStatusLabel(ev.mapped_status))+'</span>'
+      : '<span></span>';
+    var amt=fmtBillingAmount(ev.amount,ev.currency);
+    var amtHtml=(amt!=null)
+      ? '<span style="font-family:var(--mono);white-space:nowrap;">'+h(amt)+'</span>'
+      : '<span style="font-family:var(--mono);color:var(--grey2);">—</span>';
+    html+='<div class="cm-log-row">';
+    html+='<span class="cm-log-time">'+h(fmtDate(ev.created_at))+'</span>';
+    html+='<span class="cm-log-tag">'+h(ev.event_type||'—')+'</span>';
+    html+='<span class="cm-log-summary" style="display:flex;align-items:center;justify-content:space-between;gap:12px;">'+pill+amtHtml+'</span>';
+    html+='</div>';
+  });
+  el.innerHTML=html;
+}
+function renderBillingHistory(officeId,force){
+  var el=document.getElementById('of-billing-list');
+  if(!el)return;
+  if(!officeId){renderBillingHistoryRows([]);return;}
+  // Cache hit (and not forcing a refresh) → render immediately.
+  if(!force&&_BILLING_CACHE[officeId]){renderBillingHistoryRows(_BILLING_CACHE[officeId]);return;}
+  // No backend key (offline/seed mode) → graceful empty state.
+  if(!SUPA_KEY){renderBillingHistoryRows([]);return;}
+  sb.from('billing_events')
+    .select('id,event_type,mapped_status,raw_stripe_status,amount,currency,occurred_at,created_at')
+    .eq('office_id',officeId)
+    .order('created_at',{ascending:false})
+    .then(function(res){
+      if(res.error){
+        // Not an admin bug — surface in console, show empty state gracefully.
+        console.error('[renderBillingHistory] read failed',res.error);
+        renderBillingHistoryRows([]);
+        return;
+      }
+      var list=res.data||[];
+      _BILLING_CACHE[officeId]=list;
+      // Only paint if the user is still on this office (avoids a late response
+      // overwriting a different office's pane).
+      if(officeId===currentOfficeId)renderBillingHistoryRows(list);
+    })
+    .catch(function(err){
+      console.error('[renderBillingHistory] failed',err);
+      renderBillingHistoryRows([]);
+    });
 }
 
 // v29 / Phase 1.2 (round 2): per-session discount cache + fetcher.
