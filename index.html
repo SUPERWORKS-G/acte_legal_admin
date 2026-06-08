@@ -1,5 +1,22 @@
 <!DOCTYPE html>
 <!--
+  acte.legal — Admin Dashboard v47
+  Visual system: identical to notariat_dashboard_v48.html
+  v47: Login-screen cosmetic cleanup (frontend-only, no master scope touched).
+       (1) Removed trailing arrow from the submit button — "Intră în cont ⟶"
+           → "Intră în cont". Fixed in BOTH the button markup (line 1563) and
+           the failed-login text re-set (line ~2751), so the arrow does not
+           reappear after a mistyped password.
+       (2) Removed the "Continuă în mod demonstrativ →" demo button entirely
+           (markup at old line 1564) AND its click handler (old lines
+           ~2757–2763). Handler removal is mandatory — leaving it would throw
+           a null-reference on page load and freeze the screen. Net effect:
+           manual demo-mode entry point is gone. The automatic seed-data
+           fallback (Supabase-error offline mode) is UNTOUCHED — that path
+           does not depend on this button. The now-unused `.auth-demo` CSS
+           rules (lines ~1521–1522) left in place — dead but harmless.
+       No data values, RPC, EF, schema, Stripe, or email work. No locks touched.
+
   acte.legal — Admin Dashboard v46
   Visual system: identical to notariat_dashboard_v48.html
   v46: Tier display-label rename. Per master v51 brief: `Starter` → `Start`,
@@ -1560,8 +1577,7 @@ html,body{background:var(--white);color:var(--ink);font-family:var(--sans);font-
       <input class="form-inp" type="password" id="auth-pass" placeholder="••••••••" autocomplete="current-password">
     </div>
     <div class="auth-err" id="auth-err"></div>
-    <button class="btn-primary" id="auth-btn">Intră în cont ⟶</button>
-    <button class="auth-demo" id="auth-demo-btn">Continuă în mod demonstrativ →</button>
+    <button class="btn-primary" id="auth-btn">Intră în cont</button>
   </div>
 </div>
 
@@ -2749,17 +2765,10 @@ document.getElementById('auth-btn').addEventListener('click',function(){
   document.getElementById('auth-btn').textContent='Se autentifică...';
   sb.auth.signInWithPassword({email:email,password:pass}).then(function(res){
     document.getElementById('auth-btn').disabled=false;
-    document.getElementById('auth-btn').textContent='Intră în cont ⟶';
+    document.getElementById('auth-btn').textContent='Intră în cont';
     if(res.error){errEl.textContent=res.error.message;errEl.classList.add('show');return;}
     bootApp(res.data.user);
   });
-});
-document.getElementById('auth-demo-btn').addEventListener('click',function(){
-  document.getElementById('db-banner').classList.add('hidden');
-  showMainApp({email:'george@super.works (demo)'});
-  OFFICES=SEED_OFFICES;CASES=SEED_CASES;TEMPLATES=SEED_TEMPLATES;RAW_INTAKE=SEED_RAW_INTAKE.slice();
-  OFFICES.forEach(function(o){OM[o.id]=o;});
-  initUI();
 });
 document.getElementById('auth-pass').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('auth-btn').click();});
 
