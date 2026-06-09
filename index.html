@@ -1,5 +1,15 @@
 <!DOCTYPE html>
 <!--
+  acte.legal — Admin Dashboard v50
+  Visual system: identical to notariat_dashboard_v48.html
+  v50: Dropped the retired "Link de checkout trimis" onboarding-checklist
+       milestone (master v56 authorized the drop, 2026-06-09). It described the
+       retired pre-merge checkout flow; the correct post-activation card-add
+       milestone will be defined when the trial→paid flow is built. Removed the
+       last entry of the `config` array in renderOnboarding (+ fixed the now-
+       trailing comma). Frontend only. No RPC/schema/Stripe/email code. No locks
+       touched. (Closes the v49 open item: onboarding 3rd copy site.)
+
   acte.legal — Admin Dashboard v49
   Visual system: identical to notariat_dashboard_v48.html
   v49: Istoric plăți (billing-events history) tab + form-copy cleanup. Frontend only.
@@ -3886,8 +3896,7 @@ function renderOnboarding(oid){
     {label:'Plan configurat',                state:o.plan?'done':'pending'},
     {label:'Persoană de contact setată',     state:(o.contact_name&&o.contact_email)?'done':'pending'},
     {label:'Client Stripe creat',            state:isComp?'na':(o.stripe_customer_id?'done':'pending')},
-    {label:'Abonament Stripe activ',         state:isComp?'na':(subActive?'done':'pending')},
-    {label:'Link de checkout trimis',        state:isComp?'na':(o.stripe_subscription_id?'done':'pending')}
+    {label:'Abonament Stripe activ',         state:isComp?'na':(subActive?'done':'pending')}
   ];
   // Operare (downstream) items — light up as office starts working
   var operare=[
