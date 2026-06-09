@@ -1,7 +1,22 @@
 <!DOCTYPE html>
 <!--
-  acte.legal — Admin Dashboard v51
+  acte.legal — Admin Dashboard v52
   Visual system: identical to notariat_dashboard_v48.html
+  v52: Graceful-cancel UI polish (George design pass, 2026-06-09).
+       (1) Header scheduled-stop indicator is now plain mono text (no box/border),
+           placed LEFT of the status tag via a separate #om-cancel-hdr element so
+           the .om-header-right 16px flex gap spaces it evenly (status tag stays
+           in place). Replaces the v51 .lib-status-pill badge.
+       (2) Dezactivare row: undo action moved LEFT, restyled as an underlined
+           text action (.undo-action; was .btn-ghost-sm), status text to its right;
+           36px gap (matches tab-to-tab) + baseline align; sits on the canonical
+           iv-form-inner 12px rhythm (32px clear above/below).
+       (3) Copy aligned to the email ("Abonament oprit"): "Anulare programată" ->
+           "Oprire programată"; undo "Anulează programarea" -> "Anulează oprirea";
+           toasts "Oprire programată" / "Oprire anulată"; note "se oprește automat".
+       (4) Fix: undo now clears the header indicator directly (undo keeps the panel
+           open and doesn't re-run openOffice, so the header was going stale).
+       Frontend only. No schema/RPC/Stripe/email code authored.
   v51: Graceful-cancel / DEZACTIVAT rework (master directive 2026-06-09).
        Deactivate is now SCHEDULE cancel-at-period-end, not instant archive.
        (1) DEZACTIVAT now derives from lifecycle_status==='archived' ONLY —
@@ -1595,6 +1610,12 @@ html,body{background:var(--white);color:var(--ink);font-family:var(--sans);font-
 .status-sel-btn{font-family:var(--mono);font-size:11px;letter-spacing:1px;text-transform:uppercase;padding:0 18px 12px;background:none;color:var(--grey2);border:none;border-bottom:2px solid transparent;cursor:pointer;transition:all 0.15s;margin-bottom:-1px;border-radius:0;}
 .status-sel-btn.sel-active{color:var(--ink);border-bottom-color:var(--ink);}
 .status-sel-btn:hover:not(.sel-active){color:var(--grey);}
+/* v52 graceful-cancel UI */
+.cancel-hdr-txt{font-family:var(--mono);font-size:11px;letter-spacing:.8px;text-transform:uppercase;color:var(--grey2);white-space:nowrap;}
+.sched-row{display:flex;align-items:baseline;gap:36px;margin:0 0 20px;}
+.undo-action{font-family:var(--mono);font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--grey2);background:none;border:none;border-bottom:1px solid var(--grey2);padding:0 0 3px;cursor:pointer;transition:all .15s;}
+.undo-action:hover{color:var(--ink);border-bottom-color:var(--ink);}
+.sched-txt{font-family:var(--mono);font-size:11px;letter-spacing:.8px;text-transform:uppercase;color:var(--grey2);}
 /* urgency dot */
 .urgency-dot{width:6px;height:6px;border-radius:50%;background:var(--red);display:inline-block;margin-left:5px;vertical-align:middle;animation:pulse 1.4s ease-in-out infinite;}
 /* action button (terminating) */
@@ -2052,6 +2073,7 @@ html,body{background:var(--white);color:var(--ink);font-family:var(--sans);font-
       <div class="om-title" id="om-title">—</div>
     </div>
     <div class="om-header-right">
+      <span id="om-cancel-hdr" class="cancel-hdr-txt" style="display:none;"></span>
       <span class="tag" id="om-status-tag">—</span>
       <button class="close-btn" id="om-close">&#x2212;</button>
     </div>
@@ -2226,13 +2248,13 @@ html,body{background:var(--white);color:var(--ink);font-family:var(--sans);font-
         <div class="iv-pane active" id="om-life-pane">
           <div class="iv-form-inner">
             <div class="iv-ctx-line">Status curent: <span id="om-life-cur-tag" class="tag tag-activ">—</span></div>
-            <div id="om-life-scheduled-row" style="display:none;margin-top:12px;"></div>
+            <div id="om-life-scheduled-row" class="sched-row" style="display:none;"></div>
             <div class="status-sel" id="om-life-sel">
               <button class="status-sel-btn" data-life="suspended" onclick="lifePick('suspended',this)">‖ Suspendă</button>
               <button class="status-sel-btn" data-life="archived" onclick="lifePick('archived',this)">— Dezactivează</button>
               <button class="status-sel-btn" data-life="active" onclick="lifePick('active',this)">Reactivează</button>
             </div>
-            <div id="om-life-cancel-note" class="iv-ctx-line" style="display:none;margin-top:12px;color:var(--grey2);line-height:1.5;">La confirmare, biroul rămâne activ până la sfârșitul perioadei plătite. La acea dată abonamentul se anulează automat și accesul se închide.</div>
+            <div id="om-life-cancel-note" class="iv-ctx-line" style="display:none;color:var(--grey2);line-height:1.5;">La confirmare, biroul rămâne activ până la sfârșitul perioadei plătite. La acea dată abonamentul se oprește automat și accesul se închide.</div>
             <span class="iv-form-lbl" style="margin-top:16px;">Motiv</span>
             <textarea class="iv-form-textarea" id="om-life-reason" placeholder="Ex: birou nu mai răspunde de 48h, suspendăm până revine online."></textarea>
             <span class="iv-form-err" id="om-life-err">Motivul este obligatoriu</span>
@@ -3439,13 +3461,20 @@ function openOffice(oid){
   var omHdrTag=(omHdrLcs==='suspended')
     ? '<span class="tag tag-avertisment">'+LIFECYCLE_LABELS.suspended+'</span>'
     : (omHdrLcs==='archived' ? '<span class="tag tag-arhivat">'+LIFECYCLE_LABELS.archived+'</span>' : officeStatusTag(o.status));
-  // v51 graceful-cancel: when a cancel is scheduled and the office is NOT yet
-  // archived, it stays Activ and shows a distinct "Anulare programată" badge
-  // (clones .lib-status-pill; date = current_period_end). Detail-only.
-  if(o.cancel_at_period_end===true&&omHdrLcs!=='archived'){
-    omHdrTag+=' <span class="lib-status-pill">Anulare programată — acces până la '+h(fmtDate(o.current_period_end))+'</span>';
-  }
   document.getElementById('om-status-tag').innerHTML=omHdrTag;
+  // v52 graceful-cancel: scheduled-stop indicator is plain mono text in its own
+  // element (#om-cancel-hdr), sitting LEFT of the status tag; the .om-header-right
+  // 16px flex gap spaces it evenly. Shown only when a cancel is scheduled and the
+  // office is not yet archived. (DEZACTIVAT still derives from 'archived' only.)
+  var omCancelHdr=document.getElementById('om-cancel-hdr');
+  if(omCancelHdr){
+    if(o.cancel_at_period_end===true&&omHdrLcs!=='archived'){
+      omCancelHdr.textContent='Oprire programată — acces până la '+fmtDate(o.current_period_end);
+      omCancelHdr.style.display='';
+    } else {
+      omCancelHdr.style.display='none';omCancelHdr.textContent='';
+    }
+  }
   document.getElementById('of-name').textContent=o.name;
   document.getElementById('of-cui').textContent=o.cui||'—';
   document.getElementById('of-website').textContent=o.website||'—';
@@ -4912,14 +4941,14 @@ function renderLifePane(){
   var r=document.getElementById('om-life-reason');if(r)r.value='';
   var e=document.getElementById('om-life-err');if(e)e.classList.remove('show');
   // v51 graceful-cancel: state 2 (active + cancel scheduled) shows the badge +
-  // an "Anulează programarea" undo control; other states hide the row. Reset the
+  // an "Anulează oprirea" undo control; other states hide the row. Reset the
   // Dezactivează scheduling note on every (re)render.
   var schedRow=document.getElementById('om-life-scheduled-row');
   if(schedRow){
     if(o.cancel_at_period_end===true&&cur!=='archived'){
       schedRow.style.display='';
-      schedRow.innerHTML='<span class="lib-status-pill">Anulare programată — acces până la '+h(fmtDate(o.current_period_end))+'</span>'
-        +'<button class="btn-ghost-sm" type="button" style="margin-left:8px;" onclick="undoCancel()">Anulează programarea</button>';
+      schedRow.innerHTML='<button class="undo-action" type="button" onclick="undoCancel()">Anulează oprirea</button>'
+        +'<span class="sched-txt">Oprire programată — acces până la '+h(fmtDate(o.current_period_end))+'</span>';
     } else {
       schedRow.style.display='none';schedRow.innerHTML='';
     }
@@ -4984,7 +5013,7 @@ function lifeCommit(){
       // on click (mirrors deactivate-notary-office v2). Office stays active.
       o.cancel_at_period_end=true;
       soundFinalizat();
-      showToast('Anulare programată: '+o.name);
+      showToast('Oprire programată: '+o.name);
       renderLifePane();renderA();
       if(typeof closeOffice==='function')closeOffice();
       return;
@@ -5002,7 +5031,7 @@ function lifeCommit(){
   var efName=lifePicked==='suspended'?'suspend-notary-office'
     :(lifePicked==='archived'?'deactivate-notary-office':'reactivate-notary-office');
   var actionLabel=lifePicked==='suspended'?'Suspendat'
-    :(lifePicked==='archived'?'Anulare programată':'Reactivat');
+    :(lifePicked==='archived'?'Oprire programată':'Reactivat');
 
   // Disable confirm button + show in-flight state on the picker.
   var confirmBtn=document.getElementById('om-life-confirm-btn');
@@ -5089,8 +5118,9 @@ function undoCancel(){
   // Seed mode — flip the flag locally to mirror live.
   if(!SUPA_KEY){
     o.cancel_at_period_end=false;
+    var chS=document.getElementById('om-cancel-hdr');if(chS){chS.style.display='none';chS.textContent='';}
     soundFinalizat();
-    showToast('Programare anulată: '+o.name);
+    showToast('Oprire anulată: '+o.name);
     renderLifePane();renderA();
     return;
   }
@@ -5123,8 +5153,9 @@ function undoCancel(){
       showToast('Răspuns neașteptat. Vezi consola.');soundErr();return;
     }
     o.cancel_at_period_end=false;
+    var chL=document.getElementById('om-cancel-hdr');if(chL){chL.style.display='none';chL.textContent='';}
     soundFinalizat();
-    showToast('Programare anulată: '+o.name);
+    showToast('Oprire anulată: '+o.name);
     refreshOfficeSubscription(currentOfficeId,function(){renderLifePane();renderA();});
   }).catch(function(err){
     console.error('[undo-cancel-notary-office] invoke threw',err);
