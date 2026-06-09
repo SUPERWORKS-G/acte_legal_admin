@@ -1,7 +1,23 @@
 <!DOCTYPE html>
 <!--
-  acte.legal — Admin Dashboard v50
+  acte.legal — Admin Dashboard v51
   Visual system: identical to notariat_dashboard_v48.html
+  v51: Graceful-cancel / DEZACTIVAT rework (master directive 2026-06-09).
+       Deactivate is now SCHEDULE cancel-at-period-end, not instant archive.
+       (1) DEZACTIVAT now derives from lifecycle_status==='archived' ONLY —
+           removed click-optimistic archive in both seed + live success paths
+           (deactivate-notary-office v2 returns ok w/o archiving on click).
+       (2) Detail header shows a distinct "Anulare programată — acces până la
+           {current_period_end}" badge when cancel_at_period_end===true &&
+           !archived. Office stays Activ. Badge clones .lib-status-pill
+           (George-approved Option B; no new primitive). Detail-only per master
+           (office LIST query left unchanged).
+       (3) refreshOfficeSubscription select + merge gain cancel_at_period_end.
+       (4) Copy: deactivate toast → "Anulare programată"; added a one-line
+           scheduling note on the Dezactivează pick; new "Anulează programarea"
+           undo control (clones .btn-ghost-sm) → undo-cancel-notary-office EF
+           (built against master contract; smoke pending EF deploy).
+       Frontend only. No schema/RPC/Stripe/email code authored.
   v50: Dropped the retired "Link de checkout trimis" onboarding-checklist
        milestone (master v56 authorized the drop, 2026-06-09). It described the
        retired pre-merge checkout flow; the correct post-activation card-add
@@ -2210,11 +2226,13 @@ html,body{background:var(--white);color:var(--ink);font-family:var(--sans);font-
         <div class="iv-pane active" id="om-life-pane">
           <div class="iv-form-inner">
             <div class="iv-ctx-line">Status curent: <span id="om-life-cur-tag" class="tag tag-activ">—</span></div>
+            <div id="om-life-scheduled-row" style="display:none;margin-top:12px;"></div>
             <div class="status-sel" id="om-life-sel">
               <button class="status-sel-btn" data-life="suspended" onclick="lifePick('suspended',this)">‖ Suspendă</button>
               <button class="status-sel-btn" data-life="archived" onclick="lifePick('archived',this)">— Dezactivează</button>
               <button class="status-sel-btn" data-life="active" onclick="lifePick('active',this)">Reactivează</button>
             </div>
+            <div id="om-life-cancel-note" class="iv-ctx-line" style="display:none;margin-top:12px;color:var(--grey2);line-height:1.5;">La confirmare, biroul rămâne activ până la sfârșitul perioadei plătite. La acea dată abonamentul se anulează automat și accesul se închide.</div>
             <span class="iv-form-lbl" style="margin-top:16px;">Motiv</span>
             <textarea class="iv-form-textarea" id="om-life-reason" placeholder="Ex: birou nu mai răspunde de 48h, suspendăm până revine online."></textarea>
             <span class="iv-form-err" id="om-life-err">Motivul este obligatoriu</span>
@@ -3421,6 +3439,12 @@ function openOffice(oid){
   var omHdrTag=(omHdrLcs==='suspended')
     ? '<span class="tag tag-avertisment">'+LIFECYCLE_LABELS.suspended+'</span>'
     : (omHdrLcs==='archived' ? '<span class="tag tag-arhivat">'+LIFECYCLE_LABELS.archived+'</span>' : officeStatusTag(o.status));
+  // v51 graceful-cancel: when a cancel is scheduled and the office is NOT yet
+  // archived, it stays Activ and shows a distinct "Anulare programată" badge
+  // (clones .lib-status-pill; date = current_period_end). Detail-only.
+  if(o.cancel_at_period_end===true&&omHdrLcs!=='archived'){
+    omHdrTag+=' <span class="lib-status-pill">Anulare programată — acces până la '+h(fmtDate(o.current_period_end))+'</span>';
+  }
   document.getElementById('om-status-tag').innerHTML=omHdrTag;
   document.getElementById('of-name').textContent=o.name;
   document.getElementById('of-cui').textContent=o.cui||'—';
@@ -4887,6 +4911,21 @@ function renderLifePane(){
   // Clear motiv + error state on re-open.
   var r=document.getElementById('om-life-reason');if(r)r.value='';
   var e=document.getElementById('om-life-err');if(e)e.classList.remove('show');
+  // v51 graceful-cancel: state 2 (active + cancel scheduled) shows the badge +
+  // an "Anulează programarea" undo control; other states hide the row. Reset the
+  // Dezactivează scheduling note on every (re)render.
+  var schedRow=document.getElementById('om-life-scheduled-row');
+  if(schedRow){
+    if(o.cancel_at_period_end===true&&cur!=='archived'){
+      schedRow.style.display='';
+      schedRow.innerHTML='<span class="lib-status-pill">Anulare programată — acces până la '+h(fmtDate(o.current_period_end))+'</span>'
+        +'<button class="btn-ghost-sm" type="button" style="margin-left:8px;" onclick="undoCancel()">Anulează programarea</button>';
+    } else {
+      schedRow.style.display='none';schedRow.innerHTML='';
+    }
+  }
+  var cnote=document.getElementById('om-life-cancel-note');
+  if(cnote)cnote.style.display='none';
 }
 function lifePick(s,btn){
   if(btn&&btn.disabled)return;
@@ -4895,6 +4934,9 @@ function lifePick(s,btn){
   document.querySelectorAll('#om-life-sel .status-sel-btn').forEach(function(b){
     b.classList.toggle('sel-active',b.dataset.life===s);
   });
+  // v51 graceful-cancel: surface the scheduling note only when Dezactivează is picked.
+  var cnote=document.getElementById('om-life-cancel-note');
+  if(cnote)cnote.style.display=(s==='archived')?'':'none';
 }
 // v44 / Round 2 (N072): lifeCommit routes through 3 lifecycle EFs via
 // supabase.functions.invoke(). Mapping:
@@ -4937,10 +4979,19 @@ function lifeCommit(){
 
   // Seed mode (no SUPA_KEY) — preserve previous in-memory behavior.
   if(!SUPA_KEY){
+    if(lifePicked==='archived'){
+      // v51 graceful-cancel: deactivate SCHEDULES a cancel, it does NOT archive
+      // on click (mirrors deactivate-notary-office v2). Office stays active.
+      o.cancel_at_period_end=true;
+      soundFinalizat();
+      showToast('Anulare programată: '+o.name);
+      renderLifePane();renderA();
+      if(typeof closeOffice==='function')closeOffice();
+      return;
+    }
     o.lifecycle_status=lifePicked;
     soundFinalizat();
-    var labelSeed=lifePicked==='suspended'?'Suspendat'
-      :(lifePicked==='archived'?'Dezactivat':'Reactivat');
+    var labelSeed=lifePicked==='suspended'?'Suspendat':'Reactivat';
     showToast(labelSeed+': '+o.name);
     renderLifePane();renderA();
     if(typeof closeOffice==='function')closeOffice();
@@ -4951,7 +5002,7 @@ function lifeCommit(){
   var efName=lifePicked==='suspended'?'suspend-notary-office'
     :(lifePicked==='archived'?'deactivate-notary-office':'reactivate-notary-office');
   var actionLabel=lifePicked==='suspended'?'Suspendat'
-    :(lifePicked==='archived'?'Dezactivat':'Reactivat');
+    :(lifePicked==='archived'?'Anulare programată':'Reactivat');
 
   // Disable confirm button + show in-flight state on the picker.
   var confirmBtn=document.getElementById('om-life-confirm-btn');
@@ -5001,7 +5052,16 @@ function lifeCommit(){
       return;
     }
     // Success — update local state from EF response (authoritative).
-    o.lifecycle_status=b.lifecycle_status||lifePicked;
+    if(lifePicked==='archived'){
+      // v51 graceful-cancel: deactivate-notary-office v2 returns ok WITHOUT
+      // archiving — it scheduled the cancel. Do NOT set lifecycle_status here
+      // (DEZACTIVAT must derive from lifecycle_status==='archived' only, set by
+      // the webhook at period end). Reflect the scheduled cancel optimistically;
+      // the real flag confirms on next refreshOfficeSubscription / reopen.
+      o.cancel_at_period_end=true;
+    } else {
+      o.lifecycle_status=b.lifecycle_status||lifePicked;
+    }
     soundFinalizat();
     showToast(actionLabel+': '+o.name);
     // reactivate-notary-office may include stripe_note when subscription
@@ -5017,6 +5077,58 @@ function lifeCommit(){
     if(errEl){errEl.textContent='Eroare rețea. Încearcă din nou.';errEl.classList.add('show');}
     soundErr();
     if(confirmBtn){confirmBtn.disabled=false;}
+  });
+}
+
+// v51 graceful-cancel UNDO (Section 13, master state 2). One-click, no Motiv,
+// no email (v1). EF contract (master): { office_id } -> { ok:true, ... };
+// errors 404 office_not_found · 409 nothing scheduled (flag false/archived) · 500.
+// EF deploy pending master confirmation — smoke once live.
+function undoCancel(){
+  var o=OM[currentOfficeId];if(!o){soundErr();return;}
+  // Seed mode — flip the flag locally to mirror live.
+  if(!SUPA_KEY){
+    o.cancel_at_period_end=false;
+    soundFinalizat();
+    showToast('Programare anulată: '+o.name);
+    renderLifePane();renderA();
+    return;
+  }
+  sb.functions.invoke('undo-cancel-notary-office',{body:{office_id:currentOfficeId}}).then(function(efRes){
+    if(efRes.error){
+      var resp=efRes.error.context;
+      var status=(resp&&resp.status)||0;
+      var bodyPromise=resp&&typeof resp.json==='function'
+        ? resp.clone().json().catch(function(){return resp.clone().text().then(function(t){return {error:'unparseable_body',raw:t};});})
+        : Promise.resolve({});
+      bodyPromise.then(function(b){
+        b=b||{};
+        var code=b.error||'unknown_error';
+        var msg;
+        if(status>=400&&status<500){
+          if(code==='office_not_found'){msg='Biroul nu a fost găsit.';}
+          else if(status===409){msg='Nu există nicio anulare programată.';}
+          else {msg='Acțiune respinsă (cod: '+code+').';}
+        } else {
+          console.error('[undo-cancel-notary-office] '+status+' error',code,b);
+          msg='Eroare. Încearcă din nou.';
+        }
+        showToast(msg);soundErr();
+      });
+      return;
+    }
+    var b=efRes.data||{};
+    if(!b.ok){
+      console.error('[undo-cancel-notary-office] 2xx but ok:false',b);
+      showToast('Răspuns neașteptat. Vezi consola.');soundErr();return;
+    }
+    o.cancel_at_period_end=false;
+    soundFinalizat();
+    showToast('Programare anulată: '+o.name);
+    refreshOfficeSubscription(currentOfficeId,function(){renderLifePane();renderA();});
+  }).catch(function(err){
+    console.error('[undo-cancel-notary-office] invoke threw',err);
+    showToast('Eroare rețea. Încearcă din nou.');soundErr();
   });
 }
 
@@ -6163,7 +6275,7 @@ function refreshOfficeSubscription(officeId,cb){
   // notary_offices on every refresh (not just sub-missing fallback).
   if(!SUPA_KEY||!officeId){if(cb)cb();return;}
   Promise.all([
-    sb.from('office_subscriptions').select('tier,tier_pending,tier_pending_effective_at,subscription_status:status,current_period_end,stripe_customer_id,stripe_subscription_id').eq('office_id',officeId).maybeSingle(),
+    sb.from('office_subscriptions').select('tier,tier_pending,tier_pending_effective_at,subscription_status:status,current_period_end,cancel_at_period_end,stripe_customer_id,stripe_subscription_id').eq('office_id',officeId).maybeSingle(),
     sb.from('notary_offices').select('plan,subscription_status,billing_cycle,lifecycle_status,current_period_end,trial_ends_at').eq('id',officeId).maybeSingle()
   ]).then(function(results){
     var subRes=results[0],ofRes=results[1];
@@ -6176,6 +6288,7 @@ function refreshOfficeSubscription(officeId,cb){
       o.tier_pending_effective_at=sub.tier_pending_effective_at||null;
       o.subscription_status=sub.subscription_status||o.subscription_status;
       o.current_period_end=sub.current_period_end||o.current_period_end;
+      o.cancel_at_period_end=(sub.cancel_at_period_end===true); // v51 graceful-cancel flag
       o.stripe_customer_id=sub.stripe_customer_id||o.stripe_customer_id;
       o.stripe_subscription_id=sub.stripe_subscription_id||o.stripe_subscription_id;
     }
