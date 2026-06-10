@@ -1,7 +1,13 @@
 <!DOCTYPE html>
 <!--
-  acte.legal — Admin Dashboard v52
+  acte.legal — Admin Dashboard v53
   Visual system: identical to notariat_dashboard_v48.html
+  v53: Audio fix (2026-06-10). Interaction sounds were silent: the browser
+       creates the AudioContext 'suspended' when first touched outside a real
+       user gesture (scroll doesn't qualify) and nothing ever resumed it.
+       Fix: one-time first-click/keydown wake listener (_wakeAudio) + a
+       resume-if-suspended check inside playTone. No other changes.
+
   v52: Graceful-cancel UI polish (George design pass, 2026-06-09).
        (1) Header scheduled-stop indicator is now plain mono text (no box/border),
            placed LEFT of the status tag via a separate #om-cancel-hdr element so
@@ -2798,11 +2804,18 @@ function showToast(m){var t=document.getElementById('toast');t.textContent=m;t.c
 // ══ AUDIO ═══════════════════════════════════════════════════════════
 var _ac=null;
 function _ctx(){if(!_ac)_ac=new(window.AudioContext||window.webkitAudioContext)();return _ac;}
+// v53: browsers create the AudioContext 'suspended' if first touched outside a
+// real user gesture (scroll doesn't count) and it then stays asleep forever.
+// Wake it on the first genuine click/keypress, and re-check before every tone.
+function _wakeAudio(){try{var c=_ctx();if(c.state==='suspended')c.resume();}catch(e){}}
+document.addEventListener('click',_wakeAudio,{once:true});
+document.addEventListener('keydown',_wakeAudio,{once:true});
 function playTone(freqs,dur,type,vol){
   if(!type)type='sine';
   if(vol===undefined)vol=0.12;
   try{
     var ctx=_ctx();
+    if(ctx.state==='suspended')ctx.resume();
     freqs.forEach(function(f,i){
       var osc=ctx.createOscillator(),gain=ctx.createGain();
       osc.connect(gain);gain.connect(ctx.destination);
