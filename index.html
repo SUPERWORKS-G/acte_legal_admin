@@ -1,7 +1,14 @@
 <!DOCTYPE html>
 <!--
-  acte.legal — Admin Dashboard v53
+  acte.legal — Admin Dashboard v54
   Visual system: identical to notariat_dashboard_v48.html
+  v54: Three one-liners (2026-06-10). (1) N074: lifecycle EF body now sends
+       reason (backend live, stores in office_lifecycle_events). (2) v52 copy
+       nit: undoCancel 409 toast aligned to "oprire" family ("Nu exista nicio
+       oprire programata."). (3) N076: generate_link_failed handling hoisted
+       above the 4xx/5xx split (EF v8 now returns 422; specific messages
+       fire on any status).
+
   v53: Audio fix (2026-06-10). Interaction sounds were silent: the browser
        creates the AudioContext 'suspended' when first touched outside a real
        user gesture (scroll doesn't qualify) and nothing ever resumed it.
@@ -5017,7 +5024,8 @@ function lifeCommit(){
     if(errEl){errEl.textContent='Motivul este obligatoriu';errEl.classList.add('show');}
     soundErr();return;
   }
-  // TODO (N074): send reason in body once master ships audit persistence.
+  // N074 SHIPPED (v54): reason now sent in body; backend stores it in
+  // office_lifecycle_events (master, 2026-06-10).
 
   // Seed mode (no SUPA_KEY) — preserve previous in-memory behavior.
   if(!SUPA_KEY){
@@ -5050,7 +5058,7 @@ function lifeCommit(){
   var confirmBtn=document.getElementById('om-life-confirm-btn');
   if(confirmBtn){confirmBtn.disabled=true;}
 
-  sb.functions.invoke(efName,{body:{office_id:currentOfficeId}}).then(function(efRes){
+  sb.functions.invoke(efName,{body:{office_id:currentOfficeId,reason:reason}}).then(function(efRes){
     if(efRes.error){
       var resp=efRes.error.context;
       var status=(resp&&resp.status)||0;
@@ -5150,7 +5158,7 @@ function undoCancel(){
         var msg;
         if(status>=400&&status<500){
           if(code==='office_not_found'){msg='Biroul nu a fost găsit.';}
-          else if(status===409){msg='Nu există nicio anulare programată.';}
+          else if(status===409){msg='Nu există nicio oprire programată.';}
           else {msg='Acțiune respinsă (cod: '+code+').';}
         } else {
           console.error('[undo-cancel-notary-office] '+status+' error',code,b);
@@ -6117,7 +6125,18 @@ function createOfficeSubscription(payload,cb){
         var msg;
         // 4xx → user-actionable Romanian (per master toast mapping spec).
         // 5xx → generic + console.error with full detail.
-        if(status>=400&&status<500){
+        // N076 CLOSED (master v58, EF v8): generate_link_failed now returns
+        // 422. Hoisted above the status split (v54) so the specific messages
+        // fire regardless of status code (covers old-500 and new-422).
+        if(code==='generate_link_failed'){
+          // Inspect `detail` to distinguish duplicate-email from other auth errors.
+          if(b.detail&&/already.*registered/i.test(b.detail)){
+            msg='Acest email este deja folosit. Încearcă alt email.';
+          } else {
+            msg='Nu am putut genera link-ul de activare. Încearcă din nou.';
+            console.error('[create-notary-office-and-billing] '+status+' error',code,b);
+          }
+        } else if(status>=400&&status<500){
           if(code==='missing_field'&&b.field){
             msg='Câmp obligatoriu lipsă: '+b.field+'.';
           } else {
@@ -6125,23 +6144,8 @@ function createOfficeSubscription(payload,cb){
           }
         } else {
           // 5xx — generic toast; full body in console for master debugging.
-          // EXCEPTION: generate_link_failed is technically returned as 500 by
-          // the EF today, but the real cause is almost always a duplicate
-          // email (already in auth.users). Surface as user-actionable.
-          // Master flagged: re-classify to 4xx + add rollback (admin note
-          // v44.5 to master).
-          if(code==='generate_link_failed'){
-            // Inspect `detail` to distinguish duplicate-email from other auth errors.
-            if(b.detail&&/already.*registered/i.test(b.detail)){
-              msg='Acest email este deja folosit. Încearcă alt email.';
-            } else {
-              msg='Nu am putut genera link-ul de activare. Încearcă din nou.';
-              console.error('[create-notary-office-and-billing] '+status+' error',code,b);
-            }
-          } else {
-            console.error('[create-notary-office-and-billing] '+status+' error',code,b);
-            msg='Eroare. Încearcă din nou.';
-          }
+          console.error('[create-notary-office-and-billing] '+status+' error',code,b);
+          msg='Eroare. Încearcă din nou.';
         }
         cb({ok:false,message:msg,code:code});
       });
